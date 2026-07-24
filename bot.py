@@ -11,9 +11,13 @@ Run with:  DISCORD_TOKEN=... python bot.py
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 import re
+import time
 from datetime import date, datetime, timedelta, timezone
+from getpass import getpass
 
 import discord
 from discord import app_commands
@@ -251,8 +255,21 @@ async def project_delete(interaction: discord.Interaction, name: str):
             "Only the project owner or a server manager can delete it.", ephemeral=True
         )
         return
-    db.delete_project(p["id"])
-    await interaction.response.send_message(f"🗑️ Deleted **{p['name']}** and all its tasks.")
+    impact = db.project_delete_impact(p["id"])
+    lines = [f"The project **{p['name']}**", f"{impact['tasks']} task(s) inside it"]
+    note = ""
+    if impact["milestones"]:
+        note = ("Milestones fed by this project will drop to 0% and may reopen: "
+                + ", ".join(f"**{x}**" for x in impact["milestones"]))
+
+    async def do_delete(i: discord.Interaction):
+        db.delete_project(p["id"])
+        await i.followup.send(f"🗑️ Deleted **{p['name']}** and its {impact['tasks']} task(s).")
+
+    await interaction.response.send_message(
+        embed=wizard.danger_embed(f"Delete {p['name']}?", lines, note),
+        view=wizard.DangerConfirm(interaction.user.id, do_delete),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +420,42 @@ digest_group = app_commands.Group(
 )
 
 
+config_group = app_commands.Group(
+    name="config", description="Server settings", guild_only=True
+)
+
+
+@config_group.command(name="signoff", description="Which role may sign off milestones")
+@app_commands.describe(role="Leave blank to restrict sign-off to Manage Server only")
+@app_commands.default_permissions(manage_guild=True)
+async def config_signoff(interaction: discord.Interaction, role: discord.Role | None = None):
+    db.set_signoff_role(interaction.guild_id, role.id if role else None)
+    if role:
+        await interaction.response.send_message(
+            f"🖊️ {role.mention} can now sign off milestones, alongside server managers."
+        )
+    else:
+        await interaction.response.send_message(
+            "🖊️ Sign-off is now limited to people with Manage Server."
+        )
+
+
+@config_group.command(name="layout", description="Which way the tree should read")
+@app_commands.describe(orientation="Left to right suits wide trees; top to bottom suits deep ones and phones")
+@app_commands.choices(orientation=[
+    app_commands.Choice(name="left to right", value="lr"),
+    app_commands.Choice(name="top to bottom", value="tb"),
+])
+@app_commands.default_permissions(manage_guild=True)
+async def config_layout(interaction: discord.Interaction,
+                        orientation: app_commands.Choice[str]):
+    db.set_layout(interaction.guild_id, orientation.value)
+    await interaction.response.send_message(
+        f"🧭 Trees will now render **{orientation.name}**. "
+        f"`/tree show orientation:` overrides it for a single image."
+    )
+
+
 @digest_group.command(name="set", description="Post a weekly project summary to a channel")
 @app_commands.describe(
     channel="Where to post", weekday="0 = Monday … 6 = Sunday", hour="Hour of day, UTC"
@@ -431,6 +484,7 @@ class Tracker(commands.Bot):
         self.tree.add_command(task_group)
         self.tree.add_command(digest_group)
         self.tree.add_command(tree_group)
+        self.tree.add_command(config_group)
         if GUILD_ID:                      # instant, scoped to one server
             guild = discord.Object(id=int(GUILD_ID))
             self.tree.copy_global_to(guild=guild)
@@ -445,7 +499,7 @@ class Tracker(commands.Bot):
     @tasks.loop(minutes=30)
     async def digest_loop(self):
         now = datetime.now(timezone.utc)
-        for s in db.all_digest_guilds():
+        for s in await asyncio.to_thread(db.all_digest_guilds):
             if now.weekday() != s["digest_weekday"] or now.hour != s["digest_hour"]:
                 continue
             if s["last_digest"]:
@@ -455,10 +509,10 @@ class Tracker(commands.Bot):
             channel = self.get_channel(s["digest_channel"])
             if channel is None:
                 continue
-            embed = self.build_digest(s["guild_id"])
+            embed = await asyncio.to_thread(self.build_digest, s["guild_id"])
             if embed:
                 await channel.send(embed=embed)
-                db.mark_digest_sent(s["guild_id"])
+                await asyncio.to_thread(db.mark_digest_sent, s["guild_id"])
 
     @digest_loop.before_loop
     async def before_digest(self):
@@ -493,18 +547,51 @@ class Tracker(commands.Bot):
 bot = Tracker()
 
 
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: Exception):
+    """Without this, any unhandled exception shows the user 'The application did
+    not respond' and the reason only reaches the journal."""
+    if isinstance(error, app_commands.CommandOnCooldown):
+        msg = f"Slow down a moment — try again in {error.retry_after:.0f}s."
+    elif isinstance(error, (app_commands.MissingPermissions,
+                            app_commands.CheckFailure)):
+        msg = "You don't have permission to do that here."
+    elif isinstance(error, app_commands.TransformerError):
+        msg = "One of those values wasn't in the right format."
+    else:
+        inner = getattr(error, "original", error)
+        logging.exception("command %s failed",
+                          interaction.command.qualified_name if interaction.command else "?",
+                          exc_info=inner)
+        msg = (f"Something went wrong running that — `{type(inner).__name__}`. "
+               f"It's been logged; `journalctl -u tracker -n 50` has the detail.")
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+    except discord.HTTPException:
+        pass
+
+
 @bot.tree.command(name="me", description="Your open tasks across every project")
 @app_commands.guild_only()
 async def me(interaction: discord.Interaction):
     rows = db.my_tasks(interaction.guild_id, interaction.user.id)
     if not rows:
-        await interaction.response.send_message("You're all clear. 🎉", ephemeral=True)
+        await interaction.response.send_message(
+            "You're all clear. 🎉\n"
+            + standing_line(interaction.guild_id, interaction.user.id),
+            ephemeral=True,
+        )
         return
     e = discord.Embed(
         title="Your open tasks",
         description="\n".join(task_line(t, show_project=True) for t in rows[:40]),
         colour=discord.Color.blurple(),
     )
+    e.add_field(name="Standing", value=standing_line(interaction.guild_id,
+                                                     interaction.user.id), inline=False)
     await interaction.response.send_message(embed=e, ephemeral=True)
 
 
@@ -554,6 +641,17 @@ def unlock_embed(m: dict, awards: dict[int, int], newly: list[dict]) -> discord.
     return e
 
 
+def level_up_embed(up: dict) -> discord.Embed:
+    e = discord.Embed(
+        title=f"⭐  Level {up['to']['index']} — {up['to']['name']}",
+        description=f"<@{up['user_id']}> moved up from **{up['from']['name']}**.",
+        colour=discord.Color.gold(),
+    )
+    if up["to"]["perk"]:
+        e.add_field(name="Comes with", value=up["to"]["perk"], inline=False)
+    return e
+
+
 def signoff_embed(m: dict) -> discord.Embed:
     e = discord.Embed(
         title=f"🟣  {m['name']}",
@@ -587,21 +685,60 @@ def pending_unlocks(guild_id: int) -> list[discord.Embed]:
         if m["settled"]:
             continue
         awards = db.settle_milestone(guild_id, m["id"], m["xp"])
+        ups = db.apply_level_ups(guild_id, awards)
         newly = [
             n for n in state
             if m["key"] in n["prereqs"]
             and all(by_key[p]["state"] == "complete" for p in n["prereqs"])
         ]
         out.append(unlock_embed(m, awards, newly))
+        out += [level_up_embed(u) for u in ups]     # after the unlock that caused it
     return out
 
 
 async def push_unlocks(interaction: discord.Interaction) -> None:
-    for e in pending_unlocks(interaction.guild_id):
+    embeds = await asyncio.to_thread(pending_unlocks, interaction.guild_id)
+    for e in embeds:
         await interaction.followup.send(embed=e)
 
 
-_name_cache: dict[int, str] = {}
+# keyed per guild — the same person can hold different nicknames in different
+# servers — and expired so a rename shows up within the hour
+_name_cache: dict[tuple[int, int], tuple[str, float]] = {}
+_NAME_TTL = 3600.0
+
+
+def standing_line(guild_id: int, user_id: int) -> str:
+    xp = db.user_xp(guild_id, user_id)
+    lv = db.level_for(guild_id, xp)
+    if lv["next_at"] is None:
+        return f"**{lv['name']}** · {xp} XP · top of the ladder"
+    return (f"**{lv['name']}** · {xp} XP\n`{bar(lv['pct'])}` "
+            f"{lv['next_at'] - xp} XP to {lv['next_name']}")
+
+
+def may_sign_off(interaction: discord.Interaction) -> bool:
+    """Server managers always may. Otherwise a configured role is required.
+
+    Sign-off exists so a person with judgement agrees the thing is really done;
+    leaving it open to everyone would defeat the point.
+    """
+    if interaction.user.guild_permissions.manage_guild:
+        return True
+    role_id = db.get_signoff_role(interaction.guild_id)
+    if role_id is None:
+        return False
+    return any(r.id == role_id for r in interaction.user.roles)
+
+
+async def deny_signoff(interaction: discord.Interaction) -> None:
+    role_id = db.get_signoff_role(interaction.guild_id)
+    who = f"<@&{role_id}>" if role_id else "someone with Manage Server"
+    await interaction.response.send_message(
+        f"Signing off is limited to {who}. "
+        f"A server manager can widen that with `/config signoff`.",
+        ephemeral=True,
+    )
 
 
 def parse_people(guild: discord.Guild, text: str) -> tuple[list[int], list[str]]:
@@ -614,23 +751,41 @@ def parse_people(guild: discord.Guild, text: str) -> tuple[list[int], list[str]]
         if token.isdigit():
             ids.append(int(token))
             continue
+        names.append(token)
+    return list(dict.fromkeys(ids)), names
+
+
+async def resolve_names(guild: discord.Guild, names: list[str]) -> tuple[list[int], list[str]]:
+    """Plain names need a lookup. The member cache is mostly empty without the
+    privileged intent, so fall back to a gateway query and give up gracefully."""
+    found, missing = [], []
+    for token in names:
         needle = token.lstrip("@").lower()
         hit = discord.utils.find(
-            lambda mem: needle in (mem.display_name.lower(), mem.name.lower())
-            or mem.display_name.lower().startswith(needle),
+            lambda mem: needle in (mem.display_name.lower(), mem.name.lower()),
             guild.members,
         )
-        (ids.append(hit.id) if hit else missing.append(token))
-    return list(dict.fromkeys(ids)), missing
+        if hit is None:
+            try:
+                matches = await guild.query_members(query=token.lstrip("@"), limit=5)
+                hit = next((m for m in matches
+                            if needle in (m.display_name.lower(), m.name.lower())), None)
+                hit = hit or (matches[0] if matches else None)
+            except Exception:
+                hit = None
+        (found.append(hit.id) if hit else missing.append(token))
+    return found, missing
 
 
 async def display_names(guild: discord.Guild, ids: list[int]) -> list[str]:
     """IDs -> display names. Falls back to a REST fetch when the member isn't
     cached, so this works without the privileged members intent."""
     out = []
+    now = time.monotonic()
     for uid in ids:
-        if uid in _name_cache:
-            out.append(_name_cache[uid])
+        hit = _name_cache.get((guild.id, uid))
+        if hit and now - hit[1] < _NAME_TTL:
+            out.append(hit[0])
             continue
         member = guild.get_member(uid)
         if member is None:
@@ -639,7 +794,7 @@ async def display_names(guild: discord.Guild, ids: list[int]) -> list[str]:
             except (discord.NotFound, discord.HTTPException):
                 member = None
         label = member.display_name if member else f"user {str(uid)[-4:]}"
-        _name_cache[uid] = label
+        _name_cache[(guild.id, uid)] = (label, now)
         out.append(label)
     return out
 
@@ -653,17 +808,56 @@ async def tree_autocomplete(interaction: discord.Interaction, current: str):
     ][:25]
 
 
+class OrientationView(discord.ui.View):
+    """Re-renders the same tree the other way round, in place."""
+
+    def __init__(self, guild_id: int, tree_key: str | None, title: str, mode: str):
+        super().__init__(timeout=900)
+        self.guild_id, self.tree_key, self.title = guild_id, tree_key, title
+        self.mode = mode
+        self.flip.label = ("Show top to bottom" if mode == "lr"
+                           else "Show left to right")
+
+    @discord.ui.button(style=discord.ButtonStyle.secondary, emoji="🧭")
+    async def flip(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        self.mode = "tb" if self.mode == "lr" else "lr"
+        button.label = ("Show top to bottom" if self.mode == "lr"
+                        else "Show left to right")
+        nodes = await asyncio.to_thread(db.tree_view, self.guild_id, self.tree_key)
+        for n in nodes:
+            n["people"] = await display_names(interaction.guild, n.get("people") or [])
+            if n["state"] == "complete" and n.get("completed_at"):
+                when = datetime.fromisoformat(n["completed_at"]).strftime("%d %b")
+                who = (await display_names(interaction.guild, [n["completed_by"]]))[0] \
+                    if n.get("completed_by") else "auto"
+                n["closed_label"] = f"closed by {who} · {when}"
+        edges = await asyncio.to_thread(db.tree_edges, self.guild_id, nodes)
+        buf = await asyncio.to_thread(
+            tree_render.render_tree, nodes, edges, self.title, self.mode)
+        await interaction.edit_original_response(
+            attachments=[discord.File(buf, filename="techtree.png")], view=self)
+
+
 @tree_group.command(name="show", description="Render a tech tree")
 @app_commands.autocomplete(tree=tree_autocomplete)
-@app_commands.describe(tree="Which tree to draw — leave blank for everything at once")
-async def tree_show(interaction: discord.Interaction, tree: str | None = None):
+@app_commands.describe(
+    tree="Which tree to draw — leave blank for everything at once",
+    orientation="Override the server default for this one image",
+)
+@app_commands.choices(orientation=[
+    app_commands.Choice(name="left to right", value="lr"),
+    app_commands.Choice(name="top to bottom", value="tb"),
+])
+async def tree_show(interaction: discord.Interaction, tree: str | None = None,
+                    orientation: app_commands.Choice[str] | None = None):
     await interaction.response.defer()
     if tree and not db.get_tree(interaction.guild_id, tree):
         await interaction.followup.send(
             f"No tree called `{tree}`. `/tree list` shows what exists.", ephemeral=True
         )
         return
-    nodes = db.tree_view(interaction.guild_id, tree)
+    nodes = await asyncio.to_thread(db.tree_view, interaction.guild_id, tree)
     if not nodes:
         await interaction.followup.send(
             "That tree is empty. Add milestones with `/tree add tree:…`.", ephemeral=True
@@ -678,12 +872,18 @@ async def tree_show(interaction: discord.Interaction, tree: str | None = None):
             n["closed_label"] = f"closed by {who} · {when}"
     t = db.get_tree(interaction.guild_id, tree) if tree else None
     title = t["name"] if t else f"{interaction.guild.name} — everything"
-    buf = tree_render.render_tree(nodes, db.tree_edges(interaction.guild_id, nodes), title)
+    edges = await asyncio.to_thread(db.tree_edges, interaction.guild_id, nodes)
+    mode = orientation.value if orientation else \
+        await asyncio.to_thread(db.get_layout, interaction.guild_id)
+    # Pillow is CPU-bound; rendering a large tree inline would stall the
+    # gateway heartbeat and can drop the bot's connection
+    buf = await asyncio.to_thread(tree_render.render_tree, nodes, edges, title, mode)
     ready = [n["name"] for n in nodes
              if n["state"] == "available" and not n.get("external_from")]
     note = ("**Ready to start:** " + ", ".join(ready)) if ready else ""
     await interaction.followup.send(
-        content=note, file=discord.File(buf, filename="techtree.png")
+        content=note, file=discord.File(buf, filename="techtree.png"),
+        view=OrientationView(interaction.guild_id, tree, title, mode),
     )
 
 
@@ -704,21 +904,30 @@ async def tree_new(interaction: discord.Interaction, key: str, name: str,
 
 @tree_group.command(name="list", description="Every tree and how far along it is")
 async def tree_list(interaction: discord.Interaction):
-    rows = db.tree_summary(interaction.guild_id)
+    await interaction.response.defer()
+    rows = await asyncio.to_thread(db.tree_summary, interaction.guild_id)
     unfiled = db.unfiled_milestones(interaction.guild_id)
     if not rows and not unfiled:
-        await interaction.response.send_message(
-            "No trees yet. Start one with `/tree new`.", ephemeral=True
+        await interaction.followup.send(
+            "No trees yet. Start one with `/start`.", ephemeral=True
         )
         return
     e = discord.Embed(title="Trees", colour=discord.Color.blurple())
-    for r in rows:
+    FIELD_CAP = 23                      # Discord rejects embeds past 25 fields
+    overflow = rows[FIELD_CAP:]
+    for r in rows[:FIELD_CAP]:
         val = f"`{bar(r['pct'])}` {r['pct']}% — {r['done']}/{r['total']} milestones"
         if r["ready"]:
             val += "\n🟡 ready: " + ", ".join(r["ready"][:3])
         if r["description"]:
             val += f"\n*{r['description']}*"
         e.add_field(name=f"{r['name']}  (`{r['key']}`)", value=val, inline=False)
+    if overflow:
+        e.add_field(
+            name=f"…and {len(overflow)} more",
+            value=", ".join(f"`{r['key']}`" for r in overflow[:40]),
+            inline=False,
+        )
     if unfiled:
         e.add_field(
             name="Unfiled",
@@ -726,7 +935,7 @@ async def tree_list(interaction: discord.Interaction):
                   f"they only appear in `/tree show` with no argument.",
             inline=False,
         )
-    await interaction.response.send_message(embed=e)
+    await interaction.followup.send(embed=e)
 
 
 @tree_group.command(name="include", description="Put an existing milestone into a tree")
@@ -770,9 +979,22 @@ async def tree_drop(interaction: discord.Interaction, tree: str):
     if not t:
         await interaction.response.send_message(f"No tree `{tree}`.", ephemeral=True)
         return
-    db.delete_tree(t["id"])
+    members = db.tree_members(t["id"])
+
+    async def do_drop(i: discord.Interaction):
+        db.delete_tree(t["id"])
+        await i.followup.send(
+            f"🗑️ Dropped the **{t['name']}** view. "
+            f"Its {len(members)} milestone(s) are now unfiled, not deleted."
+        )
+
     await interaction.response.send_message(
-        f"🗑️ Dropped the **{t['name']}** view. Its milestones are now unfiled, not deleted."
+        embed=wizard.danger_embed(
+            f"Drop the {t['name']} view?",
+            [f"The **{t['name']}** grouping"],
+            f"Its {len(members)} milestone(s) survive as unfiled and keep all progress.",
+        ),
+        view=wizard.DangerConfirm(interaction.user.id, do_drop, label="Drop it"),
     )
 
 
@@ -804,12 +1026,14 @@ async def tree_add(
         return
     mid = db.create_milestone(interaction.guild_id, key, name, unlocks, xp, description,
                               auto_close)
-    stubbed = []
+    stubbed, looped = [], []
     for raw in filter(None, (r.strip() for r in requires.split(","))):
         rid, created = db.find_or_stub(interaction.guild_id, raw)
         if rid == mid:
             continue
-        db.add_dep(mid, rid)
+        if not db.add_dep(mid, rid):
+            looped.append(raw)
+            continue
         if created:
             stubbed.append(raw)
     filed = ""
@@ -828,6 +1052,8 @@ async def tree_add(
             if tree and (t := db.get_tree(interaction.guild_id, tree)):
                 db.add_to_tree(t["id"], sid)
         msg += f"\n🌱 Stubbed in: {', '.join(stubbed)} — describe them with `/tree edit`."
+    if looped:
+        msg += f"\n⚠️ Skipped {', '.join(looped)} — depending on those would make a loop."
     msg += f"\nLink the work with `/tree link key:{key} project:…`"
     await interaction.response.send_message(msg)
 
@@ -890,7 +1116,13 @@ async def tree_requires(interaction: discord.Interaction, key: str, prerequisite
     if m["id"] == pid:
         await interaction.response.send_message("A milestone can't gate itself.", ephemeral=True)
         return
-    db.add_dep(m["id"], pid)
+    if not db.add_dep(m["id"], pid):
+        await interaction.response.send_message(
+            f"That would make a loop — **{m['name']}** already sits upstream of "
+            f"that milestone, so each would wait on the other forever.",
+            ephemeral=True,
+        )
+        return
     for t in db.trees_for_milestone(m["id"]):
         db.add_to_tree(t["id"], pid)
     p = db.get_milestone(interaction.guild_id, prerequisite) or \
@@ -926,6 +1158,9 @@ async def tree_link(interaction: discord.Interaction, key: str, project: str):
     credit="Who to split the XP between — @mentions or names, comma separated"
 )
 async def tree_confirm(interaction: discord.Interaction, key: str, credit: str = ""):
+    if not may_sign_off(interaction):
+        await deny_signoff(interaction)
+        return
     m = db.get_milestone(interaction.guild_id, key)
     if not m:
         await interaction.response.send_message(f"No milestone `{key}`.", ephemeral=True)
@@ -936,14 +1171,17 @@ async def tree_confirm(interaction: discord.Interaction, key: str, credit: str =
             f"**{m['name']}** is already signed off.", ephemeral=True
         )
         return
-    ids, missing = parse_people(interaction.guild, credit)
+    ids, names = parse_people(interaction.guild, credit)
+    extra, missing = await resolve_names(interaction.guild, names)
+    ids += extra
     db.complete_milestone(m["id"], interaction.user.id, ids or None)
     warn = ""
     if ids:
         each = m["xp"] // len(ids)
         warn += f"\nSplitting {m['xp']} XP evenly — {each} each to {len(ids)} people."
     if missing:
-        warn += f"\n⚠️ Couldn't find: {', '.join(missing)} — they got nothing."
+        warn += (f"\n⚠️ Couldn't find: {', '.join(missing)} — they got nothing. "
+                 f"@mentions are matched reliably; plain names are not.")
     if node and node["pct"] < 100:
         warn = (f"\n⚠️ Only {node['pct']}% of its tasks were done — "
                 f"confirming anyway, which is a legitimate override but worth saying out loud.")
@@ -957,11 +1195,16 @@ async def tree_confirm(interaction: discord.Interaction, key: str, credit: str =
 @app_commands.autocomplete(key=milestone_autocomplete)
 @app_commands.describe(credit="Who to split the XP between — @mentions or names")
 async def tree_complete(interaction: discord.Interaction, key: str, credit: str = ""):
+    if not may_sign_off(interaction):
+        await deny_signoff(interaction)
+        return
     m = db.get_milestone(interaction.guild_id, key)
     if not m:
         await interaction.response.send_message(f"No milestone `{key}`.", ephemeral=True)
         return
-    ids, missing = parse_people(interaction.guild, credit)
+    ids, names = parse_people(interaction.guild, credit)
+    extra, missing = await resolve_names(interaction.guild, names)
+    ids += extra
     db.complete_milestone(m["id"], interaction.user.id, ids or None)
     tail = f" Splitting XP between {len(ids)} people." if ids else ""
     if missing:
@@ -974,6 +1217,7 @@ async def tree_complete(interaction: discord.Interaction, key: str, credit: str 
 
 @tree_group.command(name="import", description="Load a plan from an attached spreadsheet")
 @app_commands.describe(file="A .csv or .yaml plan — drag it straight onto the message box")
+@app_commands.default_permissions(manage_guild=True)
 async def tree_import(interaction: discord.Interaction, file: discord.Attachment):
     if not file.filename.lower().endswith((".csv", ".tsv", ".yaml", ".yml")):
         await interaction.response.send_message(
@@ -1046,8 +1290,23 @@ async def tree_remove(interaction: discord.Interaction, key: str):
     if not m:
         await interaction.response.send_message(f"No milestone `{key}`.", ephemeral=True)
         return
-    db.delete_milestone(m["id"])
-    await interaction.response.send_message(f"🗑️ Removed **{m['name']}**.")
+    node = next((n for n in db.tree_state(interaction.guild_id) if n["id"] == m["id"]), None)
+    dependents = [n["name"] for n in db.tree_state(interaction.guild_id)
+                  if m["key"] in n["prereqs"]]
+    lines = [f"The milestone **{m['name']}**", "its dependency links"]
+    if node and node["state"] == "complete":
+        lines.append("its closure record and credited XP")
+    note = ("Currently gating: " + ", ".join(f"**{x}**" for x in dependents)
+            + " — those will unlock immediately.") if dependents else ""
+
+    async def do_remove(i: discord.Interaction):
+        db.delete_milestone(m["id"])
+        await i.followup.send(f"🗑️ Removed **{m['name']}**.")
+
+    await interaction.response.send_message(
+        embed=wizard.danger_embed(f"Remove {m['name']}?", lines, note),
+        view=wizard.DangerConfirm(interaction.user.id, do_remove, label="Remove"),
+    )
 
 
 @bot.tree.command(name="start", description="Guided setup — build a tree with fill-in-the-blank forms")
@@ -1103,10 +1362,10 @@ async def help_cmd(interaction: discord.Interaction):
 @app_commands.describe(tree="Limit to one tree")
 @app_commands.autocomplete(tree=tree_autocomplete)
 async def next_up(interaction: discord.Interaction, tree: str | None = None):
-    nodes = db.tree_view(interaction.guild_id, tree)
+    nodes = await asyncio.to_thread(db.tree_view, interaction.guild_id, tree)
     if not nodes:
-        await interaction.response.send_message(
-            "No tech tree yet. Build one with `/tree add`.", ephemeral=True
+        await interaction.followup.send(
+            "No tech tree yet. Build one with `/start`.", ephemeral=True
         )
         return
     by_key = {n["key"]: n for n in nodes}
@@ -1166,7 +1425,45 @@ async def next_up(interaction: discord.Interaction, tree: str | None = None):
     own = [n for n in nodes if not n.get("external_from")]
     done = sum(1 for n in own if n["state"] == "complete")
     e.set_footer(text=f"{done} of {len(own)} milestones unlocked")
-    await interaction.response.send_message(embed=e)
+    await interaction.followup.send(embed=e)
+
+
+@bot.tree.command(name="levels", description="The XP ladder, and where you sit on it")
+@app_commands.guild_only()
+async def levels(interaction: discord.Interaction):
+    ladder = db.list_levels(interaction.guild_id)
+    xp = db.user_xp(interaction.guild_id, interaction.user.id)
+    lines = []
+    for i, r in enumerate(ladder, start=1):
+        here = "**← you**" if db.level_for(interaction.guild_id, xp)["threshold"] == r["threshold"] else ""
+        perk = f" — *{r['perk']}*" if r["perk"] else ""
+        lines.append(f"`{i}.` **{r['name']}** · {r['threshold']} XP{perk} {here}")
+    e = discord.Embed(title="Levels", description="\n".join(lines),
+                      colour=discord.Color.gold())
+    e.add_field(name="You", value=standing_line(interaction.guild_id,
+                                                interaction.user.id), inline=False)
+    e.set_footer(text="Levels are cosmetic for now. /config level edits the ladder.")
+    await interaction.response.send_message(embed=e, ephemeral=True)
+
+
+@config_group.command(name="level", description="Add or edit a rung on the XP ladder")
+@app_commands.describe(threshold="XP required", name="What it's called",
+                       perk="What it should grant — descriptive for now")
+@app_commands.default_permissions(manage_guild=True)
+async def config_level(interaction: discord.Interaction, threshold: int,
+                       name: str, perk: str = ""):
+    db.set_level(interaction.guild_id, max(0, threshold), name, perk)
+    await interaction.response.send_message(
+        f"⭐ **{name}** now sits at {threshold} XP." +
+        (f" Grants: {perk}" if perk else "")
+    )
+
+
+@config_group.command(name="unlevel", description="Remove a rung from the ladder")
+@app_commands.default_permissions(manage_guild=True)
+async def config_unlevel(interaction: discord.Interaction, threshold: int):
+    db.remove_level(interaction.guild_id, threshold)
+    await interaction.response.send_message(f"Removed the rung at {threshold} XP.")
 
 
 @bot.tree.command(name="leaderboard", description="XP earned from unlocked milestones")
@@ -1180,11 +1477,13 @@ async def leaderboard(interaction: discord.Interaction):
         )
         return
     medals = ["🥇", "🥈", "🥉"]
-    lines = [
-        f"{medals[i] if i < 3 else f'`{i + 1}.`'} <@{r['user_id']}> — **{r['xp']} XP** "
-        f"· {r['unlocks']} milestone(s)"
-        for i, r in enumerate(rows)
-    ]
+    lines = []
+    for i, r in enumerate(rows):
+        lv = db.level_for(interaction.guild_id, r["xp"])
+        lines.append(
+            f"{medals[i] if i < 3 else f'`{i + 1}.`'} <@{r['user_id']}> — "
+            f"**{r['xp']} XP** · {lv['name']} · {r['unlocks']} milestone(s)"
+        )
     e = discord.Embed(
         title="Leaderboard",
         description="\n".join(lines),
@@ -1195,6 +1494,9 @@ async def leaderboard(interaction: discord.Interaction):
 
 
 if __name__ == "__main__":
-    if not TOKEN:
-        raise SystemExit("Set DISCORD_TOKEN in your environment first.")
-    bot.run(TOKEN)
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    token = TOKEN or getpass("Discord bot token: ")
+    if not token:
+        raise SystemExit("A Discord bot token is required.")
+    bot.run(token)

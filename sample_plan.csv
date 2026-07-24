@@ -1,0 +1,5 @@
+tree,milestone,description,unlocks,requires,xp,auto_close
+Candidate forum,Venue booked,Call three halls; compare quotes; sign; pay deposit,the date becomes announceable,,150,true
+Candidate forum,Panel confirmed,Four candidates agree in writing,promotion can start,Venue booked,250,true
+Candidate forum,Promotion live,Flyers; press release; social push,turnout,Panel confirmed; Funding secured,400,false
+Program build-out,Scope locked,SOW agreed with both consultants,funders will read it,,150,true

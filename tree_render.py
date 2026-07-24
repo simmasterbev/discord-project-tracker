@@ -30,11 +30,15 @@ LABEL = {
     "available": "READY TO START",
     "active": "IN PROGRESS",
     "pending": "NEEDS SIGN-OFF",
+    "early": "DONE EARLY",
     "complete": "COMPLETE",
 }
 
 NODE_W, NODE_H = 254, 156
+DUMMY_H = 20                      # cross-axis slot reserved for a routed edge
+DUMMY_W = 26
 H_GAP, V_GAP = 108, 34
+MAX_EDGE = 2600                   # downscale past this so Discord always accepts it
 PAD = 46
 TITLE_H = 74
 
@@ -83,28 +87,66 @@ def compute_layers(nodes: list[dict], edges: list[tuple[str, str]]) -> dict[str,
     return depth
 
 
-def order_columns(nodes, edges, depth) -> dict[str, tuple[int, int]]:
-    """Returns key -> (column, row), barycenter-ordered to reduce crossings."""
-    cols: dict[int, list[str]] = {}
+def plan_layout(nodes, edges):
+    """Layered layout with routing lanes for long edges.
+
+    An edge spanning more than one column used to be drawn straight across,
+    cutting through whatever nodes sat in between. Here each such edge gets a
+    chain of invisible dummy slots, one per intermediate column, so it is ordered
+    alongside real nodes and routed around them. Ordering is then refined by
+    alternating barycenter sweeps rather than the single downward pass we had.
+    """
+    depth = compute_layers(nodes, edges)
+    layers: dict[int, list[str]] = {}
     for n in nodes:
-        cols.setdefault(depth[n["key"]], []).append(n["key"])
+        layers.setdefault(depth[n["key"]], []).append(n["key"])
 
-    prereqs: dict[str, list[str]] = {n["key"]: [] for n in nodes}
+    routing: list[tuple[str, str]] = []
+    chains: dict[tuple[str, str], list[str]] = {}
     for src, dst in edges:
-        if dst in prereqs and src in prereqs:
-            prereqs[dst].append(src)
+        if src not in depth or dst not in depth:
+            continue
+        d0, d1 = depth[src], depth[dst]
+        if d1 - d0 <= 1:
+            routing.append((src, dst))
+            chains[(src, dst)] = []
+            continue
+        chain, prev = [], src
+        for d in range(d0 + 1, d1):
+            dk = f"\x00{src}>{dst}@{d}"
+            depth[dk] = d
+            layers.setdefault(d, []).append(dk)
+            routing.append((prev, dk))
+            chain.append(dk)
+            prev = dk
+        routing.append((prev, dst))
+        chains[(src, dst)] = chain
 
-    pos: dict[str, tuple[int, int]] = {}
-    for c in sorted(cols):
-        keys = cols[c]
-        if c > 0:
+    preds: dict[str, list[str]] = {}
+    succs: dict[str, list[str]] = {}
+    for a, b in routing:
+        preds.setdefault(b, []).append(a)
+        succs.setdefault(a, []).append(b)
+
+    order = {d: list(ks) for d, ks in layers.items()}
+    idx: dict[str, int] = {}
+
+    def reindex():
+        for ks in order.values():
+            for i, k in enumerate(ks):
+                idx[k] = i
+
+    reindex()
+    for sweep in range(4):                      # down, up, down, up
+        downward = sweep % 2 == 0
+        rel = preds if downward else succs
+        for d in (sorted(order) if downward else sorted(order, reverse=True)):
             def bary(k):
-                ps = [pos[p][1] for p in prereqs[k] if p in pos]
-                return sum(ps) / len(ps) if ps else 99
-            keys.sort(key=bary)
-        for r, k in enumerate(keys):
-            pos[k] = (c, r)
-    return pos
+                ns = [idx[x] for x in rel.get(k, []) if x in idx]
+                return sum(ns) / len(ns) if ns else idx[k]
+            order[d] = sorted(order[d], key=bary)
+            reindex()
+    return depth, order, chains
 
 
 # --- drawing ---------------------------------------------------------------
@@ -131,22 +173,55 @@ def render_tree(
     nodes: list[dict],
     edges: Iterable[tuple[str, str]],
     title: str = "Tech Tree",
+    orientation: str = "lr",
 ) -> io.BytesIO:
-    """nodes: [{key, name, state, pct, xp, unlocks}]  edges: [(prereq_key, key)]"""
+    """nodes: [{key, name, state, pct, xp, unlocks}]  edges: [(prereq_key, key)]
+
+    orientation "lr" runs prerequisites left to right; "tb" runs them top to
+    bottom, which suits deep narrow trees and reads better on a phone.
+    """
+    tb = str(orientation).lower() in ("tb", "top-to-bottom", "vertical", "down")
     edges = list(edges)
     if not nodes:
         nodes = [{"key": "_", "name": "No milestones yet", "state": "locked",
                   "pct": 0, "xp": 0, "unlocks": "Add one with /tree add"}]
         edges = []
 
-    depth = compute_layers(nodes, edges)
-    pos = order_columns(nodes, edges, depth)
+    depth, order, chains = plan_layout(nodes, edges)
     by_key = {n["key"]: n for n in nodes}
+    is_real = lambda k: k in by_key
 
-    n_cols = max(c for c, _ in pos.values()) + 1
-    n_rows = max(r for _, r in pos.values()) + 1
-    width = PAD * 2 + n_cols * NODE_W + (n_cols - 1) * H_GAP
-    height = TITLE_H + PAD * 2 + n_rows * NODE_H + (n_rows - 1) * V_GAP
+    # One packing routine serves both orientations: layers advance along the
+    # "main" axis, items stack along the "cross" axis. Routing lanes are thin on
+    # the cross axis and full width on the main one, whichever those happen to be.
+    def size(k):
+        if is_real(k):
+            return NODE_W, NODE_H
+        return (DUMMY_W, NODE_H) if tb else (NODE_W, DUMMY_H)
+
+    if tb:
+        main_start, main_step = TITLE_H + PAD // 2, NODE_H + V_GAP
+        cross_start, cross_gap = PAD, H_GAP
+    else:
+        main_start, main_step = PAD, NODE_W + H_GAP
+        cross_start, cross_gap = TITLE_H + PAD // 2, V_GAP
+
+    origin: dict[str, tuple[int, int]] = {}
+    for layer, keys in order.items():
+        c = cross_start
+        main = main_start + layer * main_step
+        for k in keys:
+            w, h = size(k)
+            origin[k] = (c, main) if tb else (main, c)
+            c += (w if tb else h) + cross_gap
+
+    def box(k) -> tuple[int, int, int, int]:
+        x0, y0 = origin[k]
+        w, h = size(k)
+        return x0, y0, x0 + w, y0 + h
+
+    width = max(box(k)[2] for k in origin) + PAD
+    height = max(box(k)[3] for k in origin) + PAD
 
     img = Image.new("RGB", (width, height), BG)
     d = ImageDraw.Draw(img)
@@ -162,39 +237,63 @@ def render_tree(
     d.text((width - PAD - 190, 33), f"{done}/{len(own)} milestones unlocked",
            font=F_SMALL, fill="#8b949e")
 
-    def box(k) -> tuple[int, int, int, int]:
-        c, r = pos[k]
-        x0 = PAD + c * (NODE_W + H_GAP)
-        y0 = TITLE_H + PAD // 2 + r * (NODE_H + V_GAP)
-        return x0, y0, x0 + NODE_W, y0 + NODE_H
+    def mid_y(k):
+        _, y0, _, y1 = box(k)
+        return (y0 + y1) // 2
+
+    def mid_x(k):
+        x0, _, x1, _ = box(k)
+        return (x0 + x1) // 2
+
+    def stroke(p, q, colour, w, dashed):
+        if not dashed:
+            d.line([p, q], fill=colour, width=w)
+            return
+        x1, y1 = p
+        x2, y2 = q
+        steps = max(abs(x2 - x1), abs(y2 - y1)) // 9 or 1
+        for i in range(0, steps, 2):
+            t0, t1 = i / steps, min((i + 0.9) / steps, 1)
+            d.line([(x1 + (x2 - x1) * t0, y1 + (y2 - y1) * t0),
+                    (x1 + (x2 - x1) * t1, y1 + (y2 - y1) * t1)],
+                   fill=colour, width=w)
 
     # edges first, so nodes sit on top
     for src, dst in edges:
-        if src not in pos or dst not in pos:
+        if src not in depth or dst not in depth:
             continue
-        sx0, sy0, sx1, sy1 = box(src)
-        dx0, dy0, dx1, dy1 = box(dst)
-        ax, ay = sx1, (sy0 + sy1) // 2
-        bx, by = dx0, (dy0 + dy1) // 2
-        mid = ax + (bx - ax) // 2
         lit = by_key[src]["state"] == "complete"
         colour = "#22c55e" if lit else "#30363d"
         w = 3 if lit else 2
-        segs = [((ax, ay), (mid, ay)), ((mid, ay), (mid, by)), ((mid, by), (bx, by))]
-        for (p, q) in segs:
-            if lit:
-                d.line([p, q], fill=colour, width=w)
-            else:                                   # dashed for not-yet-earned paths
-                x1, y1 = p
-                x2, y2 = q
-                steps = max(abs(x2 - x1), abs(y2 - y1)) // 9 or 1
-                for i in range(steps):
-                    if i % 2:
-                        continue
-                    t0, t1 = i / steps, min((i + 0.9) / steps, 1)
-                    d.line([(x1 + (x2 - x1) * t0, y1 + (y2 - y1) * t0),
-                            (x1 + (x2 - x1) * t1, y1 + (y2 - y1) * t1)],
-                           fill=colour, width=w)
+
+        if tb:
+            waypoints = [(mid_x(src), box(src)[3])]
+            for dk in chains.get((src, dst), []):
+                _, ly0, _, ly1 = box(dk)
+                x = mid_x(dk)
+                # straight through the band, so bends only fall in empty gaps
+                waypoints += [(x, ly0), (x, ly1)]
+            waypoints.append((mid_x(dst), box(dst)[1]))
+        else:
+            waypoints = [(box(src)[2], mid_y(src))]
+            for dk in chains.get((src, dst), []):
+                lx0, _, lx1, _ = box(dk)
+                y = mid_y(dk)
+                waypoints += [(lx0, y), (lx1, y)]
+            waypoints.append((box(dst)[0], mid_y(dst)))
+
+        for (ax, ay), (bx, by) in zip(waypoints, waypoints[1:]):
+            if tb:
+                mid = ay + (by - ay) // 2
+                stroke((ax, ay), (ax, mid), colour, w, not lit)
+                stroke((ax, mid), (bx, mid), colour, w, not lit)
+                stroke((bx, mid), (bx, by), colour, w, not lit)
+            else:
+                mid = ax + (bx - ax) // 2
+                stroke((ax, ay), (mid, ay), colour, w, not lit)
+                stroke((mid, ay), (mid, by), colour, w, not lit)
+                stroke((mid, by), (bx, by), colour, w, not lit)
+        bx, by = waypoints[-1]
         d.ellipse([bx - 5, by - 5, bx + 5, by + 5], fill=colour)
 
     for n in nodes:
@@ -217,7 +316,9 @@ def render_tree(
                             outline=t["edge"], width=border)
 
         tag = ("NEEDS DEFINING" if stub
-               else f"FROM {ext.upper()}"[:18] if ext else LABEL[n["state"]])
+               else f"FROM {ext.upper()}"[:18] if ext
+               else LABEL["early"] if n.get("out_of_order")
+               else LABEL[n["state"]])
         tw = d.textlength(tag, font=F_TAG)
         d.rounded_rectangle([x0 + 12, y0 + 11, x0 + 24 + tw, y0 + 27], radius=6,
                             fill="#30363d" if (ext or stub) else t["accent"])
@@ -265,6 +366,7 @@ def render_tree(
             px, py = x0 + 13, bar_y + 32
             shown, overflow = people[:3], max(0, len(people) - 3)
             for who in shown:
+                who = str(who)
                 label = who if len(who) <= 12 else who[:11] + "…"
                 w = d.textlength(label, font=F_PILL)
                 if px + w + 16 > x1 - 13:
@@ -277,8 +379,12 @@ def render_tree(
             if overflow:
                 d.text((px, py + 3), f"+{overflow}", font=F_PILL, fill="#8b949e")
 
+    if max(img.size) > MAX_EDGE:            # keep it inside Discord's upload limit
+        scale = MAX_EDGE / max(img.size)
+        img = img.resize((int(width * scale), int(height * scale)), Image.LANCZOS)
+
     buf = io.BytesIO()
-    img.save(buf, format="PNG")
+    img.save(buf, format="PNG", optimize=True)
     buf.seek(0)
     return buf
 
@@ -294,6 +400,7 @@ if __name__ == "__main__":
     ]
     demo_edges = [("scope", "demand"), ("scope", "budget"), ("partner", "demand"),
                   ("demand", "grant"), ("budget", "grant"), ("grant", "build")]
-    out = render_tree(demo_nodes, demo_edges, "Demo Tech Tree")
-    open("demo_tree.png", "wb").write(out.read())
-    print("wrote demo_tree.png")
+    for mode, fname in (("lr", "demo_tree.png"), ("tb", "demo_tree_tb.png")):
+        open(fname, "wb").write(
+            render_tree(demo_nodes, demo_edges, "Demo Tech Tree", mode).read())
+        print("wrote", fname)

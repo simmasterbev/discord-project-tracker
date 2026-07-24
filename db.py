@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -50,6 +51,9 @@ CREATE TABLE IF NOT EXISTS log (
 
 CREATE TABLE IF NOT EXISTS settings (
     guild_id       INTEGER PRIMARY KEY,
+    signoff_role   INTEGER,
+    layout         TEXT NOT NULL DEFAULT 'lr',   -- lr or tb
+
     digest_channel INTEGER,
     digest_weekday INTEGER NOT NULL DEFAULT 0,   -- 0 = Monday
     digest_hour    INTEGER NOT NULL DEFAULT 9,   -- UTC
@@ -114,10 +118,26 @@ CREATE TABLE IF NOT EXISTS tree_members (
 
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
 CREATE INDEX IF NOT EXISTS idx_projects_guild ON projects(guild_id);
+-- ---- levels ------------------------------------------------------------
+-- Scaffolding only for now: thresholds, names, and a free-text `perk` that
+-- describes what the level is meant to grant. Acting on a perk (granting a
+-- Discord role, unlocking a command, whatever) belongs in LEVEL_HOOKS below.
+CREATE TABLE IF NOT EXISTS levels (
+    guild_id  INTEGER NOT NULL,
+    threshold INTEGER NOT NULL,          -- cumulative XP required
+    name      TEXT    NOT NULL,
+    perk      TEXT    NOT NULL DEFAULT '',
+    PRIMARY KEY (guild_id, threshold)
+);
+
 CREATE INDEX IF NOT EXISTS idx_credit_guild ON credit(guild_id, user_id);
 """
 
 _conn: Optional[sqlite3.Connection] = None
+# every call now runs inside asyncio.to_thread, so a shared connection needs a
+# lock: SQLite tolerates cross-thread use with check_same_thread off, but two
+# writers interleaving statements does not end well
+_lock = threading.RLock()
 
 VALID_STATUSES = ("todo", "doing", "blocked", "done")
 
@@ -135,6 +155,8 @@ MIGRATIONS = [
     ("milestones", "is_stub", "INTEGER NOT NULL DEFAULT 0"),
     ("milestones", "completed_by", "INTEGER"),
     ("milestones", "credit_ids", "TEXT"),
+    ("settings", "signoff_role", "INTEGER"),
+    ("settings", "layout", "TEXT NOT NULL DEFAULT 'lr'"),
 ]
 
 
@@ -168,13 +190,15 @@ def conn() -> sqlite3.Connection:
 
 
 def _q(sql: str, args: tuple = ()) -> list[sqlite3.Row]:
-    return conn().execute(sql, args).fetchall()
+    with _lock:
+        return conn().execute(sql, args).fetchall()
 
 
 def _exec(sql: str, args: tuple = ()) -> sqlite3.Cursor:
-    cur = conn().execute(sql, args)
-    conn().commit()
-    return cur
+    with _lock:
+        cur = conn().execute(sql, args)
+        conn().commit()
+        return cur
 
 
 # --------------------------------------------------------------------------
@@ -408,11 +432,36 @@ def delete_milestone(mid: int) -> None:
     _exec("DELETE FROM milestones WHERE id = ?", (mid,))
 
 
-def add_dep(milestone_id: int, requires_id: int) -> None:
+def creates_cycle(milestone_id: int, requires_id: int) -> bool:
+    """True if requiring `requires_id` would make the graph circular.
+
+    Walks up from the proposed prerequisite; if we reach the milestone itself,
+    the edge closes a loop and both nodes would lock forever with no explanation.
+    """
+    if milestone_id == requires_id:
+        return True
+    seen, stack = set(), [requires_id]
+    while stack:
+        cur = stack.pop()
+        if cur == milestone_id:
+            return True
+        if cur in seen:
+            continue
+        seen.add(cur)
+        stack += [r["requires_id"] for r in _q(
+            "SELECT requires_id FROM milestone_deps WHERE milestone_id = ?", (cur,))]
+    return False
+
+
+def add_dep(milestone_id: int, requires_id: int) -> bool:
+    """Returns False and changes nothing if the edge would create a cycle."""
+    if creates_cycle(milestone_id, requires_id):
+        return False
     _exec(
         "INSERT OR IGNORE INTO milestone_deps (milestone_id, requires_id) VALUES (?, ?)",
         (milestone_id, requires_id),
     )
+    return True
 
 
 def remove_dep(milestone_id: int, requires_id: int) -> None:
@@ -476,6 +525,56 @@ def milestone_progress(milestone_id: int) -> dict[str, Any]:
     }
 
 
+def _bulk_progress(guild_id: int) -> dict[int, dict[str, int]]:
+    """Progress for every milestone in the guild, in one query."""
+    rows = _q(
+        "SELECT mp.milestone_id AS mid,"
+        "       COALESCE(SUM(t.weight), 0) AS total,"
+        "       COALESCE(SUM(CASE WHEN t.status='done' THEN t.weight ELSE 0 END), 0) AS done_w,"
+        "       COUNT(t.id) AS n,"
+        "       COALESCE(SUM(t.status != 'done'), 0) AS remaining "
+        "FROM milestones m "
+        "JOIN milestone_projects mp ON mp.milestone_id = m.id "
+        "LEFT JOIN tasks t ON t.project_id = mp.project_id "
+        "WHERE m.guild_id = ? GROUP BY mp.milestone_id",
+        (guild_id,),
+    )
+    out = {}
+    for r in rows:
+        total = r["total"] or 0
+        out[r["mid"]] = {
+            "pct": round(100 * (r["done_w"] or 0) / total) if total else 0,
+            "tasks": r["n"] or 0,
+            "remaining": r["remaining"] or 0,
+        }
+    return out
+
+
+def _bulk_people(guild_id: int) -> dict[int, dict[str, list[int]]]:
+    """Assignees per milestone, split into those with open work and those who
+    closed something. One query for the whole guild."""
+    rows = _q(
+        "SELECT mp.milestone_id AS mid, t.assignee_id AS uid,"
+        "       SUM(t.status = 'done') AS done_n,"
+        "       SUM(t.status != 'done') AS open_n "
+        "FROM milestones m "
+        "JOIN milestone_projects mp ON mp.milestone_id = m.id "
+        "JOIN tasks t ON t.project_id = mp.project_id "
+        "WHERE m.guild_id = ? AND t.assignee_id IS NOT NULL "
+        "GROUP BY mp.milestone_id, t.assignee_id "
+        "ORDER BY open_n DESC, t.assignee_id",
+        (guild_id,),
+    )
+    out: dict[int, dict[str, list[int]]] = {}
+    for r in rows:
+        slot = out.setdefault(r["mid"], {"done": [], "open": []})
+        if r["done_n"]:
+            slot["done"].append(r["uid"])
+        if r["open_n"]:
+            slot["open"].append(r["uid"])
+    return out
+
+
 def tree_state(guild_id: int) -> list[dict[str, Any]]:
     """Every milestone with a derived state: locked / available / active / complete.
 
@@ -488,7 +587,11 @@ def tree_state(guild_id: int) -> list[dict[str, Any]]:
     for src, dst in deps(guild_id):
         prereqs[dst].append(src)
 
-    prog = {m["key"]: milestone_progress(m["id"]) for m in ms}
+    # four queries total, regardless of how many milestones there are
+    bulk_prog = _bulk_progress(guild_id)
+    bulk_people = _bulk_people(guild_id)
+    blank = {"pct": 0, "tasks": 0, "remaining": 0}
+    prog = {m["key"]: bulk_prog.get(m["id"], blank) for m in ms}
 
     # "the tasks are finished" and "we agree it's achieved" are different claims.
     # auto_close milestones treat them as one; the rest wait for a human.
@@ -518,9 +621,11 @@ def tree_state(guild_id: int) -> list[dict[str, Any]]:
         else:
             state = "available"
         out.append({
+            "out_of_order": complete[k] and not gate_open,
             "id": m["id"], "key": k, "name": m["name"], "unlocks": m["unlocks"],
             "description": m["description"],
-            "people": people_on(m["id"], complete[k] or pending[k]),
+            "people": _people_from(m, bulk_people.get(m["id"]),
+                                    complete[k] or pending[k]),
             "auto_close": bool(m["auto_close"]), "is_stub": bool(m["is_stub"]),
             "completed_at": m["completed_at"], "completed_by": m["completed_by"],
             "xp": m["xp"], "state": state, "pct": 100 if complete[k] else prog[k]["pct"],
@@ -863,3 +968,142 @@ def closure_history(guild_id: int, tree_key: Optional[str] = None) -> list[sqlit
         args += [guild_id, tree_key]
     sql += "GROUP BY m.id ORDER BY m.completed_at DESC"
     return _q(sql, tuple(args))
+
+
+def set_signoff_role(guild_id: int, role_id: Optional[int]) -> None:
+    get_settings(guild_id)
+    _exec("UPDATE settings SET signoff_role = ? WHERE guild_id = ?", (role_id, guild_id))
+
+
+def get_signoff_role(guild_id: int) -> Optional[int]:
+    return get_settings(guild_id)["signoff_role"]
+
+
+def project_delete_impact(project_id: int) -> dict[str, Any]:
+    """What a /project delete would actually destroy."""
+    tasks = _q("SELECT COUNT(*) AS n FROM tasks WHERE project_id = ?", (project_id,))[0]["n"]
+    return {"tasks": tasks, "milestones": [m["name"] for m in milestones_for_project(project_id)]}
+
+
+def set_layout(guild_id: int, mode: str) -> None:
+    get_settings(guild_id)
+    _exec("UPDATE settings SET layout = ? WHERE guild_id = ?",
+          ("tb" if mode == "tb" else "lr", guild_id))
+
+
+def get_layout(guild_id: int) -> str:
+    return get_settings(guild_id)["layout"] or "lr"
+
+
+# --------------------------------------------------------------------------
+# levels — framework, deliberately unfinished
+# --------------------------------------------------------------------------
+# XP currently only accumulates. This gives it a shape: thresholds with names,
+# and a place for consequences to be attached later. Nothing here grants
+# anything yet; `perk` is descriptive text and LEVEL_HOOKS is the extension
+# point where real effects should be registered.
+
+DEFAULT_LEVELS = [
+    (0,    "Newcomer",   ""),
+    (250,  "Regular",    ""),
+    (750,  "Contributor",""),
+    (1750, "Steward",    ""),
+    (3500, "Anchor",     ""),
+]
+
+# Callables invoked as hook(guild_id, user_id, old_level, new_level) whenever
+# someone crosses a threshold. Register from bot.py to grant roles, post
+# announcements, unlock commands. Kept as a plain list so nothing here needs to
+# know about Discord.
+LEVEL_HOOKS: list = []
+
+
+def ensure_default_levels(guild_id: int) -> None:
+    if _q("SELECT 1 FROM levels WHERE guild_id = ? LIMIT 1", (guild_id,)):
+        return
+    for threshold, name, perk in DEFAULT_LEVELS:
+        _exec("INSERT OR IGNORE INTO levels (guild_id, threshold, name, perk) "
+              "VALUES (?, ?, ?, ?)", (guild_id, threshold, name, perk))
+
+
+def list_levels(guild_id: int) -> list[sqlite3.Row]:
+    ensure_default_levels(guild_id)
+    return _q("SELECT * FROM levels WHERE guild_id = ? ORDER BY threshold", (guild_id,))
+
+
+def set_level(guild_id: int, threshold: int, name: str, perk: str = "") -> None:
+    ensure_default_levels(guild_id)
+    _exec("INSERT INTO levels (guild_id, threshold, name, perk) VALUES (?, ?, ?, ?) "
+          "ON CONFLICT(guild_id, threshold) DO UPDATE SET name = ?, perk = ?",
+          (guild_id, threshold, name, perk, name, perk))
+
+
+def remove_level(guild_id: int, threshold: int) -> None:
+    _exec("DELETE FROM levels WHERE guild_id = ? AND threshold = ?", (guild_id, threshold))
+
+
+def user_xp(guild_id: int, user_id: int) -> int:
+    rows = _q("SELECT COALESCE(SUM(xp), 0) AS xp FROM credit "
+              "WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
+    return rows[0]["xp"] or 0
+
+
+def level_for(guild_id: int, xp: int) -> dict[str, Any]:
+    """Current level plus how far into the next one this much XP sits."""
+    ladder = list_levels(guild_id)
+    current = ladder[0] if ladder else None
+    nxt = None
+    for row in ladder:
+        if xp >= row["threshold"]:
+            current = row
+        else:
+            nxt = row
+            break
+    floor = current["threshold"] if current else 0
+    span = (nxt["threshold"] - floor) if nxt else 0
+    return {
+        "name": current["name"] if current else "—",
+        "perk": current["perk"] if current else "",
+        "threshold": floor,
+        "index": [r["threshold"] for r in ladder].index(floor) + 1 if current else 0,
+        "total": len(ladder),
+        "next_name": nxt["name"] if nxt else None,
+        "next_at": nxt["threshold"] if nxt else None,
+        "into": xp - floor,
+        "span": span,
+        "pct": round(100 * (xp - floor) / span) if span else 100,
+    }
+
+
+def apply_level_ups(guild_id: int, awards: dict[int, int]) -> list[dict[str, Any]]:
+    """Given XP just minted, work out who crossed a threshold and fire hooks.
+
+    `awards` is user_id -> xp added, so the pre-award total is today's total
+    minus the award.
+    """
+    crossed = []
+    for uid, amount in awards.items():
+        after = user_xp(guild_id, uid)
+        before = after - amount
+        old, new = level_for(guild_id, before), level_for(guild_id, after)
+        if new["threshold"] > old["threshold"]:
+            crossed.append({"user_id": uid, "from": old, "to": new})
+            for hook in LEVEL_HOOKS:
+                try:
+                    hook(guild_id, uid, old, new)
+                except Exception:      # a broken hook must not lose the XP
+                    pass
+    return crossed
+
+
+def _people_from(m: sqlite3.Row, slot: Optional[dict], is_complete: bool) -> list[int]:
+    """Same rule as people_on, fed from the bulk map instead of its own queries.
+
+    Finished milestone -> who did the work (or the explicit credit list).
+    Live milestone -> who is holding open tasks right now.
+    """
+    if is_complete:
+        if m["credit_ids"]:
+            return [int(x) for x in m["credit_ids"].split(",") if x.strip().isdigit()]
+        return sorted(slot["done"]) if slot else []
+    return slot["open"] if slot else []

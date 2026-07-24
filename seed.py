@@ -197,7 +197,9 @@ def apply_doc(doc: dict, guild_id: int, owner: int) -> list[str]:
         node = db.get_milestone(guild_id, m["key"])
         for req in m.get("requires", []) or []:
             pre_id, stubbed = db.find_or_stub(guild_id, req)
-            db.add_dep(node["id"], pre_id)
+            if not db.add_dep(node["id"], pre_id):
+                log.append(f"  !! {m['key']} <- {req} skipped: would create a loop")
+                continue
             log.append(f"  gate   {m['key']} <- {req}" + ("  (stubbed)" if stubbed else ""))
         for proj in m.get("projects", []) or []:
             p = db.get_project(guild_id, proj)

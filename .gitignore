@@ -1,9 +1,16 @@
-.venv/
-__pycache__/
-*.py[cod]
+# the database is live data, never commit it
 tracker.db
-*.sqlite
-*.sqlite3
+tracker.db-journal
+backups/
+*.db
+
+# secrets live in /etc/tracker.env on the server, never in the repo
 .env
-.env.*
-demo_tree.png
+*.env
+
+# generated
+__pycache__/
+*.pyc
+venv/
+*.png
+!docs/*.png

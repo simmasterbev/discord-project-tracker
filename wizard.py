@@ -139,12 +139,14 @@ class MilestoneModal(discord.ui.Modal):
 
         # unknown prerequisites become stubs rather than errors, so a tree can be
         # built top-down: name the gate now, describe it later
-        stubbed = []
+        stubbed, looped = [], []
         for term in filter(None, (t.strip() for t in str(self.m_requires).split(","))):
             rid, created = db.find_or_stub(gid, term)
             if rid == mid:
                 continue
-            db.add_dep(mid, rid)
+            if not db.add_dep(mid, rid):
+                looped.append(term)
+                continue
             if created:
                 if tree:
                     db.add_to_tree(tree["id"], rid)
@@ -154,6 +156,9 @@ class MilestoneModal(discord.ui.Modal):
         if stubbed:
             line += (f"\n🌱 Created placeholder(s) for {', '.join(stubbed)} — "
                      f"press **Add milestone** again to fill them in.")
+        if looped:
+            line += (f"\n⚠️ Skipped {', '.join(looped)} — those already wait on this "
+                     f"milestone, so the dependency would be circular.")
         line += ("\n💡 Close it with `/tree confirm` when it's done, or attach "
                  "trackable work with `/task add`.")
         await self.on_done(interaction, line)
@@ -310,4 +315,54 @@ def preview_embed(pv: dict, filename: str) -> discord.Embed:
     if not any((pv["new_trees"], pv["known_trees"], pv["created"], pv["updated"])):
         e.description = "Nothing usable found in that file. Check the header row."
         e.colour = discord.Color.red()
+    return e
+
+
+class DangerConfirm(discord.ui.View):
+    """Two-step gate for anything that destroys data."""
+
+    def __init__(self, author_id: int, on_confirm, label: str = "Delete"):
+        super().__init__(timeout=60)
+        self.author_id = author_id
+        self.on_confirm = on_confirm
+        self.go.label = label
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "Only whoever ran the command can confirm it.", ephemeral=True
+            )
+            return False
+        return True
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+
+    @discord.ui.button(label="Delete", style=discord.ButtonStyle.danger)
+    async def go(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(view=self)
+        await self.on_confirm(interaction)
+        self.stop()
+
+    @discord.ui.button(label="Keep it", style=discord.ButtonStyle.secondary)
+    async def no(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            content="Cancelled — nothing was removed.", embed=None, view=self
+        )
+        self.stop()
+
+
+def danger_embed(title: str, what_goes: list[str], note: str = "") -> discord.Embed:
+    e = discord.Embed(
+        title=title,
+        description="**This cannot be undone.**" + (f"\n{note}" if note else ""),
+        colour=discord.Color.red(),
+    )
+    e.add_field(name="Will be destroyed", value="\n".join(f"• {x}" for x in what_goes),
+                inline=False)
     return e

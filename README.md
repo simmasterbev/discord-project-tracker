@@ -64,6 +64,9 @@ No privileged intents are required.
 | `/tree confirm key [credit]` | Sign off a milestone; optionally name who splits the XP |
 | `/tree history [tree]` | Who closed what, and when |
 | `/tree import file:` | Load a plan from an attached spreadsheet |
+| `/config signoff role:` | Which role may sign off milestones |
+| `/config layout orientation:` | Left-to-right or top-to-bottom, server-wide |
+| `/tree show orientation:` | Pick the orientation for this image |
 | `/tree requires key prerequisite` | Gate one milestone behind another |
 | `/tree link key project` | Attach a project's tasks to a milestone |
 | `/tree complete key` | Close a milestone by hand |
@@ -209,6 +212,32 @@ contribution order, which is who earned the XP.
 Names are resolved through a REST fetch when the member isn't cached, so this
 works without the privileged members intent.
 
+## Who may sign off
+
+`/tree confirm` and `/tree complete` are restricted, because a sign-off gate that
+anyone can press is not a gate. By default only **Manage Server** qualifies.
+Widen it with:
+
+```
+/config signoff role:@Coordinators
+```
+
+Everything else — creating milestones, closing tasks, importing plans — stays
+open to everyone.
+
+## Deleting things
+
+`/project delete`, `/tree remove`, and `/tree drop` show what will be destroyed
+and wait for a confirmation press. `/tree remove` also names any milestones the
+deletion would unlock, since removing a gate silently opens whatever it held.
+
+## Cycles
+
+A dependency that would make the graph circular is refused at the point of
+creation, in every route: `/tree requires`, `/tree add`, the `/start` form, and
+the file loader. Without that check both milestones lock permanently and nothing
+in the interface explains why.
+
 ## Closure record
 
 Every closed milestone keeps who signed it and when. It shows in three places:
@@ -277,6 +306,29 @@ Milestones in no tree are "unfiled" and appear only in `/tree show` with no
 argument. Existing installs upgrade cleanly: the new tables are additive, and
 milestones created before trees existed simply start out unfiled.
 
+### Out-of-order completion
+
+A milestone whose own work finishes before its prerequisites do is allowed to
+complete. This is deliberate: real work happens out of sequence, and refusing to
+record it would make the board less honest, not more. Those nodes render with a
+**DONE EARLY** tag so the state is legible rather than looking like a rendering
+bug.
+
+### Levels
+
+`db.py` carries a level ladder — thresholds, names, and a free-text `perk`
+describing what each is meant to grant. `/levels` shows it, `/config level`
+edits it, and `/leaderboard` and `/me` display standing.
+
+**It is scaffolding.** Nothing is granted yet; `perk` is descriptive. The
+extension point is `db.LEVEL_HOOKS`, a list of callables invoked as
+`hook(guild_id, user_id, old_level, new_level)` whenever someone crosses a
+threshold. Register from `bot.py` to grant Discord roles, unlock commands, or
+post to a channel. `db` deliberately knows nothing about Discord, and a hook
+that raises is swallowed so a broken reward can never lose someone's XP.
+
+Defaults: Newcomer 0, Regular 250, Contributor 750, Steward 1750, Anchor 3500.
+
 ### On XP
 
 XP is minted **only when a milestone unlocks**, then split across contributors in
@@ -288,6 +340,42 @@ is to move something that was actually gating the project.
 `/leaderboard` is optional social pressure. The unlock announcement is the part
 that does the real work — it converts "I finished a chore" into "I opened a door
 for everyone."
+
+## Performance notes
+
+Database calls and PNG rendering both run in worker threads via
+`asyncio.to_thread`, and `db` holds a lock around every statement. Rendering a
+30-node tree takes roughly a third of a second — long enough to stall the gateway
+heartbeat if it ran inline, which can drop the bot's connection.
+
+Orientation is chosen per image on the command itself:
+
+```
+/tree show tree:forum orientation:top-to-bottom
+```
+
+and the rendered image carries a 🧭 button that re-renders it the other way in
+place, so nobody has to retype anything. `/config layout` sets the server
+default for when the option is left blank. It matters more than it sounds: a six-step chain renders 2156×299
+left-to-right, a strip too wide to read on a phone, and 346×1249 top-to-bottom.
+Wide shallow trees want left-to-right; deep narrow ones want top-to-bottom.
+
+Layout is a layered DAG: longest-path depth, then four alternating barycenter
+sweeps, with dummy routing lanes reserved for edges spanning more than one
+column. Output is downscaled past 2600px on the long edge so a large tree always
+fits Discord's upload limit.
+
+A caveat on the routing lanes: they are theoretically sound but **not
+empirically justified**. Measured against a build with lanes disabled — including
+a graph built specifically to force a long edge across a crowded column — stray
+edge pixels inside node bodies were identical (8–11 either way, all
+antialiasing). They are defensive, not a fix for a demonstrated defect. An
+earlier claim of a large improvement here was a measurement error: the figure
+counted a completed node's own green progress bar as edge pixels.
+
+`tree_state` issues **four queries regardless of tree size** — one for
+milestones, one for dependencies, and two aggregates for progress and
+assignees. It was previously about two per milestone (44 for 20 nodes).
 
 ## Extending
 
