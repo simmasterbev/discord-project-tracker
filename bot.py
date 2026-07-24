@@ -17,7 +17,6 @@ import os
 import re
 import time
 from datetime import date, datetime, timedelta, timezone
-from getpass import getpass
 
 import discord
 from discord import app_commands
@@ -1496,7 +1495,8 @@ async def leaderboard(interaction: discord.Interaction):
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    token = "".join((TOKEN or getpass("Discord bot token: ")).split())
+    token = "".join(c for c in (TOKEN or input("Discord bot token: "))
+                     if 32 <= ord(c) <= 126)
     if not token:
         raise SystemExit("A Discord bot token is required.")
     bot.run(token)
