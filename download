@@ -1,16 +1,4 @@
-# the database is live data, never commit it
-tracker.db
-tracker.db-journal
-backups/
-*.db
-
-# secrets live in /etc/tracker.env on the server, never in the repo
-.env
-*.env
-
-# generated
-__pycache__/
-*.pyc
-venv/
-*.png
-!docs/*.png
+tree,milestone,description,unlocks,requires,xp,auto_close
+Candidate forum,Venue booked,"Call three halls, compare quotes, sign the contract, pay the deposit",the date becomes announceable,,150,true
+Candidate forum,Panel confirmed,Four candidates agree in writing and hold the date,promotion can start,Venue booked,250,true
+Candidate forum,Promotion live,"Flyers printed, press release out, social push scheduled",turnout,Panel confirmed,400,false
