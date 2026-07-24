@@ -1496,7 +1496,7 @@ async def leaderboard(interaction: discord.Interaction):
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    token = TOKEN or getpass("Discord bot token: ")
+    token = (TOKEN or getpass("Discord bot token: ")).strip()
     if not token:
         raise SystemExit("A Discord bot token is required.")
     bot.run(token)
