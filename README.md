@@ -1,234 +1,347 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Tree planner</title>
-<style>
-  :root{
-    --ground:#0e1116; --grid:#161b22; --surface:#131820; --line:#252c38;
-    --ink:#e6edf3; --muted:#8b949e;
-    --locked:#4b5563; --ready:#f0b429; --done:#22c55e; --signoff:#a855f7;
-    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
-    --sans:system-ui,-apple-system,"Segoe UI",sans-serif;
-  }
-  *{box-sizing:border-box}
-  body{
-    margin:0;padding:0;background:var(--ground);color:var(--ink);font-family:var(--sans);
-    background-image:linear-gradient(var(--grid) 1px,transparent 1px),
-                     linear-gradient(90deg,var(--grid) 1px,transparent 1px);
-    background-size:34px 34px;
-  }
-  header{padding:28px 24px 18px;border-bottom:1px solid var(--line)}
-  h1{margin:0;font-size:22px;letter-spacing:-.01em}
-  header p{margin:6px 0 0;color:var(--muted);font-size:14px;max-width:62ch}
-  .wrap{display:grid;grid-template-columns:minmax(340px,440px) 1fr;gap:0;align-items:start}
-  @media(max-width:900px){.wrap{grid-template-columns:1fr}}
-  .pane{padding:20px 24px}
-  .pane+.pane{border-left:1px solid var(--line)}
-  @media(max-width:900px){.pane+.pane{border-left:0;border-top:1px solid var(--line)}}
+# Discord Project Progress Tracker
 
-  label{display:block;font-family:var(--mono);font-size:10px;letter-spacing:.09em;
-        text-transform:uppercase;color:var(--muted);margin:0 0 5px}
-  input[type=text],textarea,input[type=number]{
-    width:100%;background:var(--ground);border:1px solid var(--line);border-radius:7px;
-    color:var(--ink);padding:8px 10px;font:inherit;font-size:14px}
-  textarea{resize:vertical;min-height:52px}
-  input:focus,textarea:focus{outline:2px solid var(--ready);outline-offset:1px;border-color:transparent}
-  .field{margin-bottom:12px}
-  .row2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+A self-hosted Discord bot for tracking projects and their tasks, with live
+progress bars, blockers, due dates, and an optional weekly digest. Storage is
+SQLite — one file, no database server.
 
-  .card{background:var(--surface);border:1px solid var(--line);border-radius:11px;
-        padding:15px;margin-bottom:14px}
-  .card h3{margin:0 0 12px;font-size:13px;font-family:var(--mono);color:var(--muted);
-           display:flex;justify-content:space-between;align-items:center;font-weight:500}
-  button{font:inherit;cursor:pointer;border-radius:7px;border:1px solid var(--line);
-         background:var(--surface);color:var(--ink);padding:8px 13px;font-size:14px}
-  button:hover{border-color:var(--muted)}
-  button:focus-visible{outline:2px solid var(--ready);outline-offset:2px}
-  .primary{background:var(--ready);color:#0e1116;border-color:var(--ready);font-weight:600}
-  .ghost{background:none;border:none;color:var(--muted);padding:2px 6px;font-size:12px}
-  .ghost:hover{color:var(--ink)}
+## Setup
 
-  .chips{display:flex;flex-wrap:wrap;gap:6px}
-  .chip{font-family:var(--mono);font-size:11px;padding:4px 9px;border-radius:20px;
-        border:1px solid var(--line);background:var(--ground);color:var(--muted);cursor:pointer}
-  .chip[aria-pressed=true]{border-color:var(--ready);color:var(--ready);background:#2a2008}
-  .chips .empty{font-size:12px;color:var(--muted);font-style:italic}
+1. Create an application at <https://discord.com/developers/applications>,
+   add a **Bot**, and copy the token.
+2. Under **OAuth2 → URL Generator**, tick `bot` and `applications.commands`,
+   grant *Send Messages* and *Embed Links*, and invite it to your server.
+3. Install and run:
 
-  .toggle{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted)}
+```bash
+pip install -r requirements.txt
+export DISCORD_TOKEN="your-token"
+python bot.py
+```
 
-  /* preview */
-  .board{display:flex;flex-wrap:wrap;gap:14px}
-  .tier{min-width:200px}
-  .tier h4{font-family:var(--mono);font-size:10px;letter-spacing:.09em;text-transform:uppercase;
-           color:var(--muted);margin:0 0 9px;font-weight:500}
-  .node{background:var(--surface);border:1px solid var(--locked);border-left-width:3px;
-        border-radius:9px;padding:10px 12px;margin-bottom:10px;width:212px}
-  .node.ready{border-color:var(--ready)}
-  .node.sign{border-color:var(--signoff)}
-  .node .tag{font-family:var(--mono);font-size:9px;letter-spacing:.08em;color:var(--muted)}
-  .node .nm{font-size:14px;font-weight:600;margin:3px 0}
-  .node .dt{font-size:11px;color:var(--muted);line-height:1.35}
-  .node .req{font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:6px}
-  .warn{color:var(--signoff)}
-  .out{margin-top:16px;padding-top:16px;border-top:1px solid var(--line)}
-  .hint{font-size:12px;color:var(--muted);line-height:1.5;margin:10px 0 0}
-  code{font-family:var(--mono);font-size:12px;background:var(--surface);padding:2px 5px;border-radius:4px}
-</style>
-</head>
-<body>
-<header>
-  <h1>Tree planner</h1>
-  <p>Lay out your milestones here, then download a spreadsheet file and hand it to
-     <code>seed.py</code>. Nothing is sent anywhere — this page runs entirely in your browser.</p>
-</header>
+Slash commands sync globally on first start and can take up to an hour to
+appear. To see them instantly while developing, replace `await self.tree.sync()`
+in `setup_hook` with:
 
-<div class="wrap">
-  <div class="pane">
-    <div class="field">
-      <label for="treename">Tree name</label>
-      <input type="text" id="treename" value="Candidate forum" oninput="render()">
-    </div>
-    <div id="editor"></div>
-    <button onclick="addNode()">+ Add milestone</button>
-  </div>
+```python
+guild = discord.Object(id=YOUR_GUILD_ID)
+self.tree.copy_global_to(guild=guild)
+await self.tree.sync(guild=guild)
+```
 
-  <div class="pane">
-    <h4 style="font-family:var(--mono);font-size:10px;letter-spacing:.09em;
-               text-transform:uppercase;color:var(--muted);margin:0 0 12px;font-weight:500">
-      Preview</h4>
-    <div class="board" id="board"></div>
-    <div class="out">
-      <button class="primary" onclick="download()">Download spreadsheet</button>
-      <button onclick="copyCsv()">Copy instead</button>
-      <p class="hint">Then run:<br>
-        <code>python seed.py your-file.csv --guild YOUR_SERVER_ID</code><br>
-        Re-running is safe — it updates rather than duplicating, so you can edit
-        the plan here and load it again.</p>
-    </div>
-  </div>
-</div>
+No privileged intents are required.
 
-<script>
-let nodes = [
-  {name:"Venue booked", desc:"Call three halls, compare quotes, sign, pay the deposit",
-   unlocks:"the date becomes announceable", req:[], xp:150, auto:true},
-  {name:"Panel confirmed", desc:"Four candidates agree in writing",
-   unlocks:"promotion can start", req:["Venue booked"], xp:250, auto:true}
-];
+## Commands
 
-const esc = s => (s||"").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+| Command | What it does |
+|---|---|
+| `/project new name description` | Start tracking a project |
+| `/project list [include_archived]` | Every project with a progress bar |
+| `/project view name` | Tasks, status breakdown, recent updates |
+| `/project log name note` | Post a narrative status update |
+| `/project archive` · `unarchive` · `delete` | Lifecycle (owner or Manage Server) |
+| `/task add project title [assignee] [due] [weight]` | Add work |
+| `/task done task_id` | Complete a task, bar updates |
+| `/task status task_id new_status` | todo / doing / blocked / done |
+| `/task assign task_id [member]` | Reassign or clear |
+| `/task list project [status] [assignee]` | Filtered view |
+| `/task delete task_id` | Remove a task |
+| `/me` | Your open tasks across all projects (private) |
+| `/start` | Guided form-based setup |
+| `/help` | Plain-language explainer |
+| `/digest set channel [weekday] [hour]` | Weekly summary + overdue list |
 
-function addNode(){
-  nodes.push({name:"", desc:"", unlocks:"", req:[], xp:100, auto:true});
-  render();
-  setTimeout(()=>document.querySelector(`#n${nodes.length-1}-name`)?.focus(), 0);
-}
-function removeNode(i){
-  const gone = nodes[i].name;
-  nodes.splice(i,1);
-  nodes.forEach(n => n.req = n.req.filter(r => r !== gone));
-  render();
-}
-function set(i,k,v){ nodes[i][k] = v; render(); }
-function toggleReq(i,name){
-  const r = nodes[i].req, at = r.indexOf(name);
-  at < 0 ? r.push(name) : r.splice(at,1);
-  render();
-}
+### Tech tree
 
-/* depth = longest path from a root, same rule the bot uses */
-function tiers(){
-  const byName = Object.fromEntries(nodes.filter(n=>n.name).map(n=>[n.name,n]));
-  const depth = {}, seen = new Set();
-  const walk = n => {
-    if(depth[n.name] !== undefined) return depth[n.name];
-    if(seen.has(n.name)) return 0;
-    seen.add(n.name);
-    const ps = n.req.map(r=>byName[r]).filter(Boolean);
-    const d = ps.length ? 1 + Math.max(...ps.map(walk)) : 0;
-    seen.delete(n.name);
-    return depth[n.name] = d;
-  };
-  nodes.filter(n=>n.name).forEach(walk);
-  const out = {};
-  nodes.filter(n=>n.name).forEach(n => (out[depth[n.name]] ||= []).push(n));
-  return out;
-}
+| Command | What it does |
+|---|---|
+| `/tree show [tree]` | Renders one tree — or everything, if you name none |
+| `/tree new key name description` | Create a named tree |
+| `/tree list` | Every tree with its progress |
+| `/tree include key tree` · `exclude` | File a milestone into / out of a tree |
+| `/tree drop tree` | Delete a view (milestones survive) |
+| `/tree add key name unlocks requires xp tree` | Add a milestone, optionally filed into a tree |
+| `/tree edit key [name] [description] [unlocks] [xp] [auto_close]` | Change a milestone after the fact |
+| `/tree confirm key [credit]` | Sign off a milestone; optionally name who splits the XP |
+| `/tree history [tree]` | Who closed what, and when |
+| `/tree import file:` | Load a plan from an attached spreadsheet |
+| `/config signoff role:` | Which role may sign off milestones |
+| `/config layout orientation:` | Left-to-right or top-to-bottom, server-wide |
+| `/tree show orientation:` | Override the orientation for one image |
+| `/tree requires key prerequisite` | Gate one milestone behind another |
+| `/tree link key project` | Attach a project's tasks to a milestone |
+| `/tree complete key` | Close a milestone by hand |
+| `/tree remove key` | Delete a milestone |
+| `/next [tree]` | What's open now, and the cheapest path to the next unlock |
+| `/leaderboard` | XP standings |
 
-function render(){
-  document.getElementById("editor").innerHTML = nodes.map((n,i)=>{
-    const others = nodes.filter((_,j)=>j!==i).map(o=>o.name).filter(Boolean);
-    const chips = others.length
-      ? others.map(o=>`<button type="button" class="chip" aria-pressed="${n.req.includes(o)}"
-           onclick="toggleReq(${i},'${esc(o).replace(/'/g,"\\'")}')">${esc(o)}</button>`).join("")
-      : `<span class="empty">Add another milestone first</span>`;
-    return `<div class="card">
-      <h3>Milestone ${i+1}<button class="ghost" onclick="removeNode(${i})">Remove</button></h3>
-      <div class="field"><label for="n${i}-name">Name</label>
-        <input type="text" id="n${i}-name" value="${esc(n.name)}"
-               placeholder="Venue booked" oninput="set(${i},'name',this.value)"></div>
-      <div class="field"><label for="n${i}-desc">What is it?</label>
-        <textarea id="n${i}-desc" placeholder="The steps, the detail, whatever helps"
-               oninput="set(${i},'desc',this.value)">${esc(n.desc)}</textarea></div>
-      <div class="field"><label for="n${i}-un">What does finishing it make possible?</label>
-        <input type="text" id="n${i}-un" value="${esc(n.unlocks)}"
-               placeholder="the date becomes announceable" oninput="set(${i},'unlocks',this.value)"></div>
-      <div class="field"><label>Must come after</label><div class="chips">${chips}</div></div>
-      <div class="row2">
-        <div class="field"><label for="n${i}-xp">XP</label>
-          <input type="number" id="n${i}-xp" min="0" max="5000" value="${n.xp}"
-                 oninput="set(${i},'xp',this.value)"></div>
-        <div class="field"><label>Closing</label>
-          <div class="toggle"><input type="checkbox" id="n${i}-a" ${n.auto?"checked":""}
-               onchange="set(${i},'auto',this.checked)">
-            <label for="n${i}-a" style="text-transform:none;letter-spacing:0;font-family:var(--sans);
-                   font-size:13px;margin:0">Closes itself at 100%</label></div></div>
-      </div>
-    </div>`;
-  }).join("");
+## Notes
 
-  const t = tiers(), depths = Object.keys(t).sort((a,b)=>a-b);
-  document.getElementById("board").innerHTML = depths.length ? depths.map(d=>`
-    <div class="tier"><h4>${d==0?"Open from the start":"After "+d+" gate"+(d>1?"s":"")}</h4>
-    ${t[d].map(n=>`<div class="node ${d==0?"ready":""} ${n.auto?"":"sign"}">
-      <div class="tag">${d==0?"READY TO START":"LOCKED"}${n.auto?"":" · NEEDS SIGN-OFF"} · ${n.xp} XP</div>
-      <div class="nm">${esc(n.name)}</div>
-      <div class="dt">${esc(n.desc)||"<span class='warn'>no description yet</span>"}</div>
-      ${n.unlocks?`<div class="dt" style="margin-top:4px">→ ${esc(n.unlocks)}</div>`:""}
-      ${n.req.length?`<div class="req">after ${n.req.map(esc).join(", ")}</div>`:""}
-    </div>`).join("")}</div>`).join("")
-    : `<p class="hint">Name a milestone and it will appear here.</p>`;
-}
+- **Weighted progress.** `weight` (1–20) lets a two-week task count more than a
+  ten-minute one, so the bar reflects effort rather than task count.
+- **Due dates** accept `YYYY-MM-DD`, `5d`, `2w`, `1m`, `today`, `tomorrow`.
+- **Scoping.** Everything keys on `guild_id`, so one instance can serve several
+  servers without projects leaking between them.
+- **Permissions.** Anyone can create projects and tasks; only the project owner
+  or someone with Manage Server can archive or delete.
+- **Backups.** The whole dataset is `tracker.db`. Copy that file.
 
-function csv(){
-  const tree = document.getElementById("treename").value.trim() || "Untitled tree";
-  const q = v => `"${String(v==null?"":v).replace(/"/g,'""')}"`;
-  const rows = [["tree","milestone","description","unlocks","requires","xp","auto_close"]];
-  nodes.filter(n=>n.name.trim()).forEach(n =>
-    rows.push([tree, n.name, n.desc, n.unlocks, n.req.join("; "), n.xp || 100, n.auto]));
-  return rows.map(r => r.map(q).join(",")).join("\n");
-}
+## The two ideas
 
-function download(){
-  const name = (document.getElementById("treename").value.trim() || "tree")
-                 .toLowerCase().replace(/[^a-z0-9]+/g,"-");
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([csv()], {type:"text/csv"}));
-  a.download = name + ".csv";
-  a.click();
-  URL.revokeObjectURL(a.href);
-}
+Everything rests on one distinction, and it's the only thing worth learning:
 
-function copyCsv(){
-  navigator.clipboard?.writeText(csv()).then(
-    () => alert("Copied. Paste it into a text file ending in .csv"),
-    () => prompt("Copy this:", csv())
-  );
-}
+- **Milestones** are the boxes on the tree. They have **prerequisites** (what must
+  finish first) and a **payoff** (what they unlock).
+- **Tasks** are the small steps inside one milestone. They have no prerequisites
+  of their own — they just tick a milestone toward 100%.
 
-render();
-</script>
-</body>
-</html>
+If you find yourself wanting to give a *task* a prerequisite, that task is really
+a milestone. Promote it.
+
+## Easiest way in: `/start`
+
+`/start` opens a pop-up form. Name the tree, then press **Add milestone** up to
+four times. Each milestone is one screen with five labelled boxes:
+
+| Box | Example |
+|---|---|
+| Milestone name | Venue booked |
+| What is it? | Call three halls, compare quotes, sign, pay the deposit |
+| What does finishing it make possible? | the date becomes announceable |
+| Must come after… | Funding secured, Scope locked |
+| XP when it unlocks | 250 |
+
+Four is the cap because a Discord form allows five inputs and because a first
+tree with more than four boxes is usually one nobody reads. Add more afterwards
+with `/tree add`.
+
+### Stubs
+
+Prerequisites are matched **by name**. Anything that doesn't exist yet is created
+as a **stub** — a placeholder node rendered in grey as **NEEDS DEFINING**.
+
+This is what makes top-down sketching possible. Start from the thing you actually
+want ("Promo campaign live"), name what it waits on, and the gates appear as
+placeholders. Fill them in on a later pass with `/tree edit` — supplying a
+description or a payoff clears the stub flag automatically. `/next` lists any
+still undefined.
+
+Stubs behave like ordinary milestones otherwise: they gate their dependents and
+can be completed. They just look unfinished, because they are.
+
+### Ways in that aren't Discord
+
+| Route | Who it's for |
+|---|---|
+| **`/tree import`** | Drag a `.csv` onto the Discord message box and attach it to the command. The bot shows a preview of exactly what it will create, change, or stub — nothing is written until you press **Apply**. |
+| **`planner.html`** | Open it in any browser — no install, no server, nothing sent anywhere. Fill in milestones, tick which ones come first, watch the tree assemble, download a spreadsheet. |
+| **A spreadsheet** | Columns: `tree, milestone, description, unlocks, requires, xp, auto_close`. One row per milestone, semicolons between multiple prerequisites. Edit in Excel or Google Sheets, export as CSV. |
+| **A YAML file** | Same structure, better for version control. See `example_tree.yaml`. |
+
+The last two end at the same place, either through Discord with `/tree import`
+or from a shell:
+
+```bash
+python seed.py your-plan.csv --guild YOUR_SERVER_ID
+```
+
+`/tree import` needs no server access at all, which makes it the route to give
+anyone who isn't going to SSH anywhere.
+
+Re-running updates rather than duplicating, so the file stays the source of truth
+if you want it to. Prerequisites naming something the file doesn't define become
+stubs.
+
+### Milestones without tasks
+
+A milestone with no linked project can't track itself, so it stays at 0% until
+someone runs `/tree confirm`. That's the normal case for a tree built through
+`/start` — the description carries the detail, and the node is a yes/no.
+
+### How XP is split
+
+Always an **even split**, never weighted. In priority order:
+
+1. Names given at close time — `/tree confirm key:x credit:"@ana @ben @cy"`.
+   Accepts mentions, IDs, or plain display names.
+2. Everyone who closed a task under the milestone.
+3. Whoever signed it off, if there's nobody else.
+
+Remainders go to the first names, so 100 XP across three people is 34/33/33.
+
+`/help` prints the same explanation in-channel.
+
+## Filling it in
+
+Order matters, because each layer references the one before it:
+
+1. `/project new` — the container for real work
+2. `/task add` — the work itself, with weights
+3. `/tree new` — a named board
+4. `/tree add` — milestones, **prerequisites before dependents**
+5. `/tree link` — attach projects so the milestone tracks itself
+
+`/tree edit` fixes anything you got wrong later.
+
+### Bulk setup
+
+Standing up a fifteen-node tree by hand is about forty slash commands. Write it
+once instead:
+
+```bash
+python seed.py example_tree.yaml --guild YOUR_SERVER_ID
+```
+
+`example_tree.yaml` documents every available field. The loader upserts by key,
+so edit the file and re-run to push changes — nothing duplicates, nothing is
+deleted. Dependencies resolve in a second pass, so you can reference a milestone
+defined further down the file.
+
+Run it on the server with the bot stopped, or against a copy of `tracker.db` and
+copy it back.
+
+## What a node shows
+
+Each card carries: state tag, XP, milestone name, **description** (what it is),
+progress bar, **unlocks** (what it buys you), and **who's on it**.
+
+The people row answers a different question depending on state. On a live
+milestone it lists whoever holds *open* tasks — the useful mid-flight question is
+who to nudge. On a completed one it lists whoever actually closed the work, in
+contribution order, which is who earned the XP.
+
+Names are resolved through a REST fetch when the member isn't cached, so this
+works without the privileged members intent.
+
+## Who may sign off
+
+`/tree confirm` and `/tree complete` are restricted, because a sign-off gate that
+anyone can press is not a gate. By default only **Manage Server** qualifies.
+Widen it with:
+
+```
+/config signoff role:@Coordinators
+```
+
+Everything else — creating milestones, closing tasks, importing plans — stays
+open to everyone.
+
+## Deleting things
+
+`/project delete`, `/tree remove`, and `/tree drop` show what will be destroyed
+and wait for a confirmation press. `/tree remove` also names any milestones the
+deletion would unlock, since removing a gate silently opens whatever it held.
+
+## Cycles
+
+A dependency that would make the graph circular is refused at the point of
+creation, in every route: `/tree requires`, `/tree add`, the `/start` form, and
+the file loader. Without that check both milestones lock permanently and nothing
+in the interface explains why.
+
+## Closure record
+
+Every closed milestone keeps who signed it and when. It shows in three places:
+on the node itself (the footer switches from the payoff line to
+`closed by Ana · 23 Jul`), in `/tree history`, and in the credit ledger behind
+`/leaderboard`. Auto-closed milestones record `auto` as the signer, since no
+human pressed anything.
+
+## Schema changes
+
+New columns are applied on startup by `_migrate()` in `db.py`, which checks
+`PRAGMA table_info` and issues an `ALTER TABLE` only when the column is missing.
+Existing databases upgrade in place with no data loss — you'll see a
+`[db] migrated:` line in the journal the first time. Take a backup first anyway.
+
+## Auto-close vs sign-off
+
+Each milestone carries `auto_close`, defaulting to **true**.
+
+- **true** — the node flips to complete the moment its linked projects hit 100%.
+- **false** — the node enters **NEEDS SIGN-OFF** (purple) instead. Downstream
+  stays locked and **no XP is paid** until someone runs `/tree confirm`.
+
+The distinction matters because "every task I wrote down is done" and "this is
+genuinely achieved" are different claims, and they diverge exactly when someone
+under-scoped the list. Cheap, well-understood milestones should close themselves.
+The two or three that other people's plans hang on are worth a human saying yes.
+
+When a sign-off milestone reaches 100%, the bot posts a purple notice once. If
+the work reopens, the notice resets and fires again when it returns. `/next`
+lists anything waiting.
+
+`/tree confirm` on a milestone below 100% works — sometimes scope legitimately
+changes — but it says the percentage out loud in the channel so the override is
+visible rather than quiet.
+
+## How the tech tree works
+
+Milestones are nodes; `requires` edges gate them. A milestone **completes** when
+every project linked to it hits 100%, which means the tree updates itself off
+normal task activity — nobody has to maintain it separately.
+
+State is derived, never stored:
+
+- **locked** — at least one prerequisite is unfinished
+- **available** — all prerequisites done, no work started
+- **active** — prerequisites done, work underway
+- **complete** — all linked projects finished
+
+When the last prerequisite lands, the bot posts an unlock announcement naming
+everyone whose tasks fed it and listing what just became possible.
+
+### Multiple trees
+
+Trees are **named views over one shared milestone graph**, not separate graphs. A
+milestone can belong to several trees at once, which is the point: if "funding
+secured" gates both your build-out and your event, it should appear in both
+boards rather than being duplicated and drifting out of sync.
+
+When a tree's member depends on a milestone filed elsewhere, that prerequisite
+still renders — tagged `FROM <tree>` with a thinner border — so a gate never
+disappears just because it belongs to another initiative. Progress counts and
+`/next` ignore those external nodes; they're context, not your scoreboard.
+
+Milestones in no tree are "unfiled" and appear only in `/tree show` with no
+argument. Existing installs upgrade cleanly: the new tables are additive, and
+milestones created before trees existed simply start out unfiled.
+
+### On XP
+
+XP is minted **only when a milestone unlocks**, then split across contributors in
+proportion to the weight of tasks they closed. This is deliberate: per-task
+points reward creating and closing trivial tasks, which is the failure mode of
+most gamified trackers. Tying the mint to milestones means the only way to score
+is to move something that was actually gating the project.
+
+`/leaderboard` is optional social pressure. The unlock announcement is the part
+that does the real work — it converts "I finished a chore" into "I opened a door
+for everyone."
+
+## Performance notes
+
+Database calls and PNG rendering both run in worker threads via
+`asyncio.to_thread`, and `db` holds a lock around every statement. Rendering a
+30-node tree takes roughly a third of a second — long enough to stall the gateway
+heartbeat if it ran inline, which can drop the bot's connection.
+
+Trees render **left to right** by default and **top to bottom** on request.
+Orientation is one setting — `/config layout` — with a per-command override on
+`/tree show`. It matters more than it sounds: a six-step chain renders 2156×299
+left-to-right, a strip too wide to read on a phone, and 346×1249 top-to-bottom.
+Wide shallow trees want left-to-right; deep narrow ones want top-to-bottom.
+
+Layout is a layered DAG: longest-path depth, then four alternating barycenter
+sweeps, with dummy routing lanes inserted for edges spanning more than one
+column so they route around intermediate nodes rather than through them. Output
+is downscaled past 2600px on the long edge so a large tree always fits Discord's
+upload limit.
+
+Reads are still N+1 — about two queries per milestone. Fine at this scale;
+the fix if it ever matters is a single joined query in `tree_state`.
+
+## Extending
+
+`db.py` is a plain function-per-query module with no ORM, so adding a field is a
+schema line plus a query. Natural next steps: threads per project, a `/burndown`
+chart via matplotlib, GitHub issue sync, or reminder DMs for overdue tasks.
