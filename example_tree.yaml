@@ -1,0 +1,93 @@
+# Every field the seeder understands. Copy this, gut it, make it yours.
+# Apply with:  python seed.py example_tree.yaml --guild YOUR_SERVER_ID
+
+# ---------------------------------------------------------------------------
+# PROJECTS hold the actual work. Milestones read their completion percentage.
+# A milestone with no project attached can only be closed by hand.
+# ---------------------------------------------------------------------------
+projects:
+  - name: scope-doc                    # unique per server, used everywhere else
+    description: Statement of work and deliverables
+    tasks:
+      - title: Draft workstream sections
+        weight: 3                      # relative effort, 1-20; drives % complete
+        due: 2026-08-15                # YYYY-MM-DD, or omit
+        assignee: 000000000000000000   # Discord user ID, or omit
+      - title: Internal review
+        weight: 1
+      - Circulate for signature         # bare string = title only, weight 1
+
+  - name: budget
+    description: Closing the funding gap
+    tasks:
+      - title: Identify remaining sources
+        weight: 2
+      - title: Confirm match commitments
+        weight: 3
+
+  - name: venue-logistics
+    description: Room, AV, and staffing
+    tasks:
+      - title: Sign venue contract
+        weight: 2
+      - title: Book AV vendor
+
+# ---------------------------------------------------------------------------
+# TREES are named views. A milestone may appear in more than one.
+# ---------------------------------------------------------------------------
+trees:
+  - key: program                       # short slug used in slash commands
+    name: Program build-out
+    description: Everything gating the first cohort
+
+    milestones:
+      - key: scope
+        name: Scope locked
+        unlocks: funders will actually read it   # the payoff, shown on the node
+        xp: 150                                  # split across contributors
+        projects: [scope-doc]                    # completion is read from these
+        # no `requires` -> this is a root, open from day one
+
+      - key: funding
+        name: Funding secured
+        unlocks: everything downstream stops being hypothetical
+        xp: 400
+        projects: [budget]
+        requires: [scope]                        # stays locked until scope is done
+
+      - key: buildout
+        name: Site build-out begins
+        unlocks: cohort one can be scheduled
+        xp: 800
+        requires: [scope, funding]               # needs BOTH; all gates are AND
+        # no `projects` -> close it by hand with /tree complete
+
+  - key: forum
+    name: Candidate forum
+    description: August event
+
+    milestones:
+      - key: venue
+        name: Venue booked
+        unlocks: date becomes announceable
+        xp: 120
+        projects: [venue-logistics]
+
+      - key: promo
+        name: Promotion live
+        unlocks: turnout
+        xp: 250
+        requires: [venue, funding]
+        # `funding` lives in the other tree. It still renders here, tagged
+        # FROM PROGRAM, because a gate you can't see is a gate you can't plan
+        # around. One milestone, two boards, no drift.
+
+# ---------------------------------------------------------------------------
+# Milestones outside any tree. They show up only in `/tree show` with no
+# argument, and as external prerequisites where they gate something.
+# ---------------------------------------------------------------------------
+milestones:
+  - key: charter
+    name: Board charter ratified
+    unlocks: legal cover for contracts
+    xp: 300
