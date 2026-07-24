@@ -6,6 +6,7 @@ without projects bleeding across them.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -61,10 +62,16 @@ CREATE TABLE IF NOT EXISTS milestones (
     guild_id     INTEGER NOT NULL,
     key          TEXT    NOT NULL,              -- short slug used in commands
     name         TEXT    NOT NULL,
+    description  TEXT    NOT NULL DEFAULT '',   -- what this milestone actually is
     unlocks      TEXT    NOT NULL DEFAULT '',   -- what becomes possible
     xp           INTEGER NOT NULL DEFAULT 100,
     completed_at TEXT,
     settled      INTEGER NOT NULL DEFAULT 0,    -- XP already minted?
+    auto_close   INTEGER NOT NULL DEFAULT 1,    -- flip to done at 100%, or wait for sign-off?
+    pending_notified INTEGER NOT NULL DEFAULT 0,
+    is_stub      INTEGER NOT NULL DEFAULT 0,    -- named as a dependency, not yet defined
+    completed_by INTEGER,
+    credit_ids   TEXT,                          -- explicit even-split credit list
     UNIQUE (guild_id, key)
 );
 
@@ -119,12 +126,38 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+# (table, column, definition) — applied on connect if the column is missing, so
+# an existing tracker.db picks up new fields without losing anything.
+MIGRATIONS = [
+    ("milestones", "description", "TEXT NOT NULL DEFAULT ''"),
+    ("milestones", "auto_close", "INTEGER NOT NULL DEFAULT 1"),
+    ("milestones", "pending_notified", "INTEGER NOT NULL DEFAULT 0"),
+    ("milestones", "is_stub", "INTEGER NOT NULL DEFAULT 0"),
+    ("milestones", "completed_by", "INTEGER"),
+    ("milestones", "credit_ids", "TEXT"),
+]
+
+
+def _migrate(c: sqlite3.Connection) -> list[str]:
+    applied = []
+    for table, column, ddl in MIGRATIONS:
+        cols = {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}
+        if cols and column not in cols:
+            c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+            applied.append(f"{table}.{column}")
+    if applied:
+        c.commit()
+    return applied
+
+
 def connect(path: Path | str = DB_PATH) -> sqlite3.Connection:
     global _conn
     _conn = sqlite3.connect(path, check_same_thread=False)
     _conn.row_factory = sqlite3.Row
     _conn.executescript(SCHEMA)
     _conn.commit()
+    for change in _migrate(_conn):
+        print(f"[db] migrated: added {change}")
     return _conn
 
 
@@ -349,10 +382,12 @@ def all_digest_guilds() -> list[sqlite3.Row]:
 # tech tree: milestones, dependencies, and earned XP
 # --------------------------------------------------------------------------
 
-def create_milestone(guild_id: int, key: str, name: str, unlocks: str = "", xp: int = 100) -> int:
+def create_milestone(guild_id: int, key: str, name: str, unlocks: str = "",
+                     xp: int = 100, description: str = "", auto_close: bool = True) -> int:
     cur = _exec(
-        "INSERT INTO milestones (guild_id, key, name, unlocks, xp) VALUES (?, ?, ?, ?, ?)",
-        (guild_id, key.lower(), name, unlocks, xp),
+        "INSERT INTO milestones (guild_id, key, name, description, unlocks, xp, auto_close) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (guild_id, key.lower(), name, description, unlocks, xp, int(auto_close)),
     )
     return cur.lastrowid
 
@@ -454,8 +489,17 @@ def tree_state(guild_id: int) -> list[dict[str, Any]]:
         prereqs[dst].append(src)
 
     prog = {m["key"]: milestone_progress(m["id"]) for m in ms}
+
+    # "the tasks are finished" and "we agree it's achieved" are different claims.
+    # auto_close milestones treat them as one; the rest wait for a human.
+    work_done = {m["key"]: prog[m["key"]]["tasks"] > 0 and prog[m["key"]]["pct"] == 100
+                 for m in ms}
     complete = {
-        m["key"]: bool(m["completed_at"]) or (prog[m["key"]]["tasks"] > 0 and prog[m["key"]]["pct"] == 100)
+        m["key"]: bool(m["completed_at"]) or (bool(m["auto_close"]) and work_done[m["key"]])
+        for m in ms
+    }
+    pending = {
+        m["key"]: (not complete[m["key"]]) and work_done[m["key"]] and not m["auto_close"]
         for m in ms
     }
 
@@ -465,6 +509,8 @@ def tree_state(guild_id: int) -> list[dict[str, Any]]:
         gate_open = all(complete.get(p, False) for p in prereqs[k])
         if complete[k]:
             state = "complete"
+        elif pending[k]:
+            state = "pending"          # work done, still gates everything downstream
         elif not gate_open:
             state = "locked"
         elif prog[k]["pct"] > 0:
@@ -473,6 +519,10 @@ def tree_state(guild_id: int) -> list[dict[str, Any]]:
             state = "available"
         out.append({
             "id": m["id"], "key": k, "name": m["name"], "unlocks": m["unlocks"],
+            "description": m["description"],
+            "people": people_on(m["id"], complete[k] or pending[k]),
+            "auto_close": bool(m["auto_close"]), "is_stub": bool(m["is_stub"]),
+            "completed_at": m["completed_at"], "completed_by": m["completed_by"],
             "xp": m["xp"], "state": state, "pct": 100 if complete[k] else prog[k]["pct"],
             "remaining": prog[k]["remaining"], "prereqs": prereqs[k],
             "blocked_by": [p for p in prereqs[k] if not complete.get(p, False)],
@@ -481,34 +531,51 @@ def tree_state(guild_id: int) -> list[dict[str, Any]]:
     return out
 
 
-def contributors(milestone_id: int) -> dict[int, int]:
-    """user_id -> summed weight of tasks they completed under this milestone."""
+def contributors(milestone_id: int) -> list[int]:
+    """Everyone who closed a task under this milestone. Order is stable."""
     rows = _q(
-        "SELECT t.assignee_id AS uid, SUM(t.weight) AS w "
+        "SELECT DISTINCT t.assignee_id AS uid "
         "FROM milestone_projects mp JOIN tasks t ON t.project_id = mp.project_id "
         "WHERE mp.milestone_id = ? AND t.status = 'done' AND t.assignee_id IS NOT NULL "
-        "GROUP BY t.assignee_id",
+        "ORDER BY t.assignee_id",
         (milestone_id,),
     )
-    return {r["uid"]: r["w"] for r in rows}
+    return [r["uid"] for r in rows]
+
+
+def even_split(xp: int, people: list[int]) -> dict[int, int]:
+    """Split as evenly as whole numbers allow; leftovers go to the first names."""
+    if not people:
+        return {}
+    base, extra = divmod(xp, len(people))
+    return {uid: base + (1 if i < extra else 0) for i, uid in enumerate(people)}
 
 
 def settle_milestone(guild_id: int, milestone_id: int, xp: int) -> dict[int, int]:
-    """Mint XP once, split across contributors by effort. Returns user_id -> xp."""
+    """Mint XP once, split across contributors by effort. Returns user_id -> xp.
+
+    A milestone with no tasks has no contributors to split across, so the credit
+    goes to whoever signed it off.
+    """
     m = _q("SELECT * FROM milestones WHERE id = ?", (milestone_id,))[0]
     if m["settled"]:
         return {}
-    shares = contributors(milestone_id)
-    total_w = sum(shares.values())
-    awards: dict[int, int] = {}
-    if total_w:
-        for uid, w in shares.items():
-            awards[uid] = max(1, round(xp * w / total_w))
-            _exec(
-                "INSERT INTO credit (guild_id, user_id, milestone_id, xp, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (guild_id, uid, milestone_id, awards[uid], now()),
-            )
+
+    # priority: names given at close > people who did tasks > whoever signed off
+    if m["credit_ids"]:
+        people = [int(x) for x in m["credit_ids"].split(",") if x.strip().isdigit()]
+    else:
+        people = contributors(milestone_id)
+    if not people and m["completed_by"]:
+        people = [m["completed_by"]]
+
+    awards = even_split(xp, people)
+    for uid, amount in awards.items():
+        _exec(
+            "INSERT INTO credit (guild_id, user_id, milestone_id, xp, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (guild_id, uid, milestone_id, amount, now()),
+        )
     _exec(
         "UPDATE milestones SET settled = 1, completed_at = COALESCE(completed_at, ?) WHERE id = ?",
         (now(), milestone_id),
@@ -516,8 +583,15 @@ def settle_milestone(guild_id: int, milestone_id: int, xp: int) -> dict[int, int
     return awards
 
 
-def complete_milestone(milestone_id: int) -> None:
-    _exec("UPDATE milestones SET completed_at = ? WHERE id = ?", (now(), milestone_id))
+def complete_milestone(milestone_id: int, user_id: Optional[int] = None,
+                       credit_ids: Optional[list[int]] = None) -> None:
+    _exec(
+        "UPDATE milestones SET completed_at = ?, completed_by = COALESCE(completed_by, ?), "
+        "credit_ids = COALESCE(?, credit_ids) WHERE id = ?",
+        (now(), user_id,
+         ",".join(str(u) for u in credit_ids) if credit_ids else None,
+         milestone_id),
+    )
 
 
 def leaderboard(guild_id: int, limit: int = 10) -> list[sqlite3.Row]:
@@ -664,7 +738,7 @@ def tree_summary(guild_id: int) -> list[dict[str, Any]]:
 
 def update_milestone(milestone_id: int, **fields: Any) -> None:
     """Patch name / unlocks / xp on an existing milestone."""
-    allowed = {"name", "unlocks", "xp"}
+    allowed = {"name", "unlocks", "xp", "description", "auto_close", "is_stub"}
     sets = {k: v for k, v in fields.items() if k in allowed and v is not None}
     if not sets:
         return
@@ -688,3 +762,104 @@ def update_project(project_id: int, **fields: Any) -> None:
         return
     clause = ", ".join(f"{k} = ?" for k in sets)
     _exec(f"UPDATE projects SET {clause} WHERE id = ?", (*sets.values(), project_id))
+
+
+def people_on(milestone_id: int, is_complete: bool) -> list[int]:
+    """Who to show on the node.
+
+    Finished milestone -> who actually did the work. Live milestone -> who is
+    holding open tasks right now, which is the more useful question mid-flight.
+    """
+    if is_complete:
+        row = _q("SELECT credit_ids FROM milestones WHERE id = ?", (milestone_id,))
+        if row and row[0]["credit_ids"]:
+            return [int(x) for x in row[0]["credit_ids"].split(",") if x.strip().isdigit()]
+        return contributors(milestone_id)
+    rows = _q(
+        "SELECT t.assignee_id AS uid, COUNT(*) AS n "
+        "FROM milestone_projects mp JOIN tasks t ON t.project_id = mp.project_id "
+        "WHERE mp.milestone_id = ? AND t.status != 'done' AND t.assignee_id IS NOT NULL "
+        "GROUP BY t.assignee_id ORDER BY n DESC",
+        (milestone_id,),
+    )
+    return [r["uid"] for r in rows]
+
+
+def set_auto_close(milestone_id: int, auto: bool) -> None:
+    _exec("UPDATE milestones SET auto_close = ? WHERE id = ?", (int(auto), milestone_id))
+
+
+def mark_pending_notified(milestone_id: int, flag: bool = True) -> None:
+    _exec("UPDATE milestones SET pending_notified = ? WHERE id = ?",
+          (int(flag), milestone_id))
+
+
+def pending_notified(milestone_id: int) -> bool:
+    rows = _q("SELECT pending_notified FROM milestones WHERE id = ?", (milestone_id,))
+    return bool(rows and rows[0]["pending_notified"])
+
+
+def milestones_for_project(project_id: int) -> list[sqlite3.Row]:
+    return _q(
+        "SELECT m.* FROM milestone_projects mp JOIN milestones m ON m.id = mp.milestone_id "
+        "WHERE mp.project_id = ?",
+        (project_id,),
+    )
+
+
+def create_stub(guild_id: int, name: str) -> int:
+    """A placeholder created because something was declared to depend on it.
+
+    Stubs let you build a tree top-down — name the gate first, describe it later.
+    """
+    base = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:20] or "stub"
+    key, n = base, 2
+    while get_milestone(guild_id, key):
+        key, n = f"{base}-{n}", n + 1
+    cur = _exec(
+        "INSERT INTO milestones (guild_id, key, name, is_stub) VALUES (?, ?, ?, 1)",
+        (guild_id, key, name.strip()[:80]),
+    )
+    return cur.lastrowid
+
+
+def find_or_stub(guild_id: int, term: str) -> tuple[int, bool]:
+    """Match a milestone by key, exact name, then partial name. Stub it if absent.
+
+    Returns (milestone_id, was_created).
+    """
+    low = term.strip().lower()
+    existing = list_milestones(guild_id)
+    hit = next((m for m in existing if m["key"] == low), None)
+    hit = hit or next((m for m in existing if m["name"].lower() == low), None)
+    hit = hit or next((m for m in existing if low in m["name"].lower()), None)
+    if hit:
+        return hit["id"], False
+    return create_stub(guild_id, term), True
+
+
+def clear_stub(milestone_id: int) -> None:
+    _exec("UPDATE milestones SET is_stub = 0 WHERE id = ?", (milestone_id,))
+
+
+def list_stubs(guild_id: int) -> list[sqlite3.Row]:
+    return _q(
+        "SELECT * FROM milestones WHERE guild_id = ? AND is_stub = 1 ORDER BY id",
+        (guild_id,),
+    )
+
+
+def closure_history(guild_id: int, tree_key: Optional[str] = None) -> list[sqlite3.Row]:
+    """Milestones that have been closed, newest first, with who and when."""
+    sql = (
+        "SELECT m.*, GROUP_CONCAT(DISTINCT c.user_id) AS credited "
+        "FROM milestones m LEFT JOIN credit c ON c.milestone_id = m.id "
+        "WHERE m.guild_id = ? AND m.completed_at IS NOT NULL "
+    )
+    args: list[Any] = [guild_id]
+    if tree_key:
+        sql += ("AND m.id IN (SELECT tm.milestone_id FROM tree_members tm "
+                "JOIN trees t ON t.id = tm.tree_id WHERE t.guild_id = ? AND t.key = ?) ")
+        args += [guild_id, tree_key]
+    sql += "GROUP BY m.id ORDER BY m.completed_at DESC"
+    return _q(sql, tuple(args))

@@ -20,11 +20,15 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 import db
+import seed
 import tree_render
+import wizard
 
 TOKEN = os.environ.get("DISCORD_TOKEN")
 GUILD_ID = os.environ.get("GUILD_ID")  # set for instant command sync on one server
 STATUS_EMOJI = {"todo": "⬜", "doing": "🔵", "blocked": "🔴", "done": "✅"}
+STATE_EMOJI = {"locked": "🔒", "available": "🟡", "active": "🔵",
+               "pending": "🟣", "complete": "✅"}
 BAR_LEN = 14
 
 
@@ -286,10 +290,19 @@ async def task_add(
         return
     tid = db.add_task(p["id"], title, assignee.id if assignee else None, due_iso, weight)
     prog = db.progress(p["id"])
+
+    feeds = db.milestones_for_project(p["id"])
+    if feeds:
+        where = ", ".join(f"**{m['name']}**" for m in feeds)
+        tail = f"\nFeeds {where}."
+    else:
+        tail = ("\n⚠️ *{}* isn't attached to any milestone, so this work won't move "
+                "the tree. Wire it up with `/tree link`.".format(p["name"]))
+
     await interaction.response.send_message(
         f"➕ `#{tid}` **{title}** → *{p['name']}*"
         f"{f' · <@{assignee.id}>' if assignee else ''}{due_label(due_iso)}\n"
-        f"`{bar(prog['pct'])}` {prog['pct']}%"
+        f"`{bar(prog['pct'])}` {prog['pct']}%{tail}"
     )
 
 
@@ -541,13 +554,37 @@ def unlock_embed(m: dict, awards: dict[int, int], newly: list[dict]) -> discord.
     return e
 
 
+def signoff_embed(m: dict) -> discord.Embed:
+    e = discord.Embed(
+        title=f"🟣  {m['name']}",
+        description="**Every task is done — but this one waits for a human.**\n"
+                    "Nothing downstream unlocks and no XP is paid out until "
+                    f"someone runs `/tree confirm key:{m['key']}`.",
+        colour=discord.Color.purple(),
+    )
+    if m.get("unlocks"):
+        e.add_field(name="Will unlock", value=m["unlocks"], inline=False)
+    e.set_footer(text="Switch it to auto with /tree edit auto_close:True")
+    return e
+
+
 def pending_unlocks(guild_id: int) -> list[discord.Embed]:
-    """Settle any milestone whose work just finished; return announcement embeds."""
+    """Settle finished milestones, and flag ones waiting on a sign-off."""
     state = db.tree_state(guild_id)
     by_key = {m["key"]: m for m in state}
     out = []
     for m in state:
-        if m["state"] != "complete" or m["settled"]:
+        if m["state"] == "pending":
+            if not db.pending_notified(m["id"]):
+                db.mark_pending_notified(m["id"], True)
+                out.append(signoff_embed(m))
+            continue
+        if m["state"] != "complete":
+            # work reopened — let it announce again if it comes back
+            if db.pending_notified(m["id"]):
+                db.mark_pending_notified(m["id"], False)
+            continue
+        if m["settled"]:
             continue
         awards = db.settle_milestone(guild_id, m["id"], m["xp"])
         newly = [
@@ -562,6 +599,49 @@ def pending_unlocks(guild_id: int) -> list[discord.Embed]:
 async def push_unlocks(interaction: discord.Interaction) -> None:
     for e in pending_unlocks(interaction.guild_id):
         await interaction.followup.send(embed=e)
+
+
+_name_cache: dict[int, str] = {}
+
+
+def parse_people(guild: discord.Guild, text: str) -> tuple[list[int], list[str]]:
+    """Accepts @mentions, raw IDs, or plain names. Returns (ids, unmatched)."""
+    ids, missing = [], []
+    for token in filter(None, (t.strip() for t in re.split(r"[,\n]| and ", text or ""))):
+        if m := re.fullmatch(r"<@!?(\d+)>", token):
+            ids.append(int(m.group(1)))
+            continue
+        if token.isdigit():
+            ids.append(int(token))
+            continue
+        needle = token.lstrip("@").lower()
+        hit = discord.utils.find(
+            lambda mem: needle in (mem.display_name.lower(), mem.name.lower())
+            or mem.display_name.lower().startswith(needle),
+            guild.members,
+        )
+        (ids.append(hit.id) if hit else missing.append(token))
+    return list(dict.fromkeys(ids)), missing
+
+
+async def display_names(guild: discord.Guild, ids: list[int]) -> list[str]:
+    """IDs -> display names. Falls back to a REST fetch when the member isn't
+    cached, so this works without the privileged members intent."""
+    out = []
+    for uid in ids:
+        if uid in _name_cache:
+            out.append(_name_cache[uid])
+            continue
+        member = guild.get_member(uid)
+        if member is None:
+            try:
+                member = await guild.fetch_member(uid)
+            except (discord.NotFound, discord.HTTPException):
+                member = None
+        label = member.display_name if member else f"user {str(uid)[-4:]}"
+        _name_cache[uid] = label
+        out.append(label)
+    return out
 
 
 async def tree_autocomplete(interaction: discord.Interaction, current: str):
@@ -589,6 +669,13 @@ async def tree_show(interaction: discord.Interaction, tree: str | None = None):
             "That tree is empty. Add milestones with `/tree add tree:…`.", ephemeral=True
         )
         return
+    for n in nodes:
+        n["people"] = await display_names(interaction.guild, n.get("people") or [])
+        if n["state"] == "complete" and n.get("completed_at"):
+            when = datetime.fromisoformat(n["completed_at"]).strftime("%d %b")
+            who = (await display_names(interaction.guild, [n["completed_by"]]))[0] \
+                if n.get("completed_by") else "auto"
+            n["closed_label"] = f"closed by {who} · {when}"
     t = db.get_tree(interaction.guild_id, tree) if tree else None
     title = t["name"] if t else f"{interaction.guild.name} — everything"
     buf = tree_render.render_tree(nodes, db.tree_edges(interaction.guild_id, nodes), title)
@@ -693,6 +780,8 @@ async def tree_drop(interaction: discord.Interaction, tree: str):
 @app_commands.describe(
     key="Short slug, e.g. `permits`",
     name="Milestone name",
+    description="What this milestone actually is",
+    auto_close="True: completes itself at 100%. False: waits for /tree confirm.",
     unlocks="What becomes possible once this lands",
     requires="Comma-separated keys that must finish first",
     xp="XP awarded to contributors when it completes",
@@ -703,22 +792,26 @@ async def tree_add(
     interaction: discord.Interaction,
     key: str,
     name: str,
+    description: str = "",
     unlocks: str = "",
     requires: str = "",
     xp: app_commands.Range[int, 0, 5000] = 100,
     tree: str | None = None,
+    auto_close: bool = True,
 ):
     if db.get_milestone(interaction.guild_id, key):
         await interaction.response.send_message(f"`{key}` already exists.", ephemeral=True)
         return
-    mid = db.create_milestone(interaction.guild_id, key, name, unlocks, xp)
-    missing = []
+    mid = db.create_milestone(interaction.guild_id, key, name, unlocks, xp, description,
+                              auto_close)
+    stubbed = []
     for raw in filter(None, (r.strip() for r in requires.split(","))):
-        pre = db.get_milestone(interaction.guild_id, raw)
-        if pre:
-            db.add_dep(mid, pre["id"])
-        else:
-            missing.append(raw)
+        rid, created = db.find_or_stub(interaction.guild_id, raw)
+        if rid == mid:
+            continue
+        db.add_dep(mid, rid)
+        if created:
+            stubbed.append(raw)
     filed = ""
     if tree:
         t = db.get_tree(interaction.guild_id, tree)
@@ -727,9 +820,14 @@ async def tree_add(
             filed = f" in **{t['name']}**"
         else:
             filed = f" — ⚠️ no tree `{tree}`, left unfiled"
-    msg = f"🌲 Added **{name}** (`{key}`, {xp} XP){filed}."
-    if missing:
-        msg += f"\n⚠️ Unknown prerequisite(s): {', '.join(missing)}"
+    gate = "closes itself at 100%" if auto_close else "waits for `/tree confirm`"
+    msg = f"🌲 Added **{name}** (`{key}`, {xp} XP){filed} — {gate}."
+    if stubbed:
+        for raw in stubbed:
+            sid, _ = db.find_or_stub(interaction.guild_id, raw)
+            if tree and (t := db.get_tree(interaction.guild_id, tree)):
+                db.add_to_tree(t["id"], sid)
+        msg += f"\n🌱 Stubbed in: {', '.join(stubbed)} — describe them with `/tree edit`."
     msg += f"\nLink the work with `/tree link key:{key} project:…`"
     await interaction.response.send_message(msg)
 
@@ -738,49 +836,70 @@ async def tree_add(
 @app_commands.autocomplete(key=milestone_autocomplete)
 @app_commands.describe(
     name="New display name",
+    description="New description of what this milestone is",
     unlocks="New description of what this makes possible",
     xp="New XP value",
+    auto_close="True: completes itself at 100%. False: waits for /tree confirm.",
 )
 async def tree_edit(
     interaction: discord.Interaction,
     key: str,
     name: str | None = None,
+    description: str | None = None,
     unlocks: str | None = None,
     xp: app_commands.Range[int, 0, 5000] | None = None,
+    auto_close: bool | None = None,
 ):
     m = db.get_milestone(interaction.guild_id, key)
     if not m:
         await interaction.response.send_message(f"No milestone `{key}`.", ephemeral=True)
         return
-    if name is None and unlocks is None and xp is None:
+    if name is description is unlocks is xp is auto_close is None:
+        gate = "closes itself at 100%" if m["auto_close"] else "waits for `/tree confirm`"
         await interaction.response.send_message(
-            f"**{m['name']}** — {m['unlocks'] or '*no payoff written*'} · {m['xp']} XP\n"
-            f"Pass `name`, `unlocks`, or `xp` to change something.",
+            f"**{m['name']}** · {m['xp']} XP · {gate}\n"
+            f"is: {m['description'] or '*no description*'}\n"
+            f"unlocks: {m['unlocks'] or '*no payoff written*'}\n"
+            f"Pass `name`, `description`, `unlocks`, `xp`, or `auto_close` to change something.",
             ephemeral=True,
         )
         return
-    db.update_milestone(m["id"], name=name, unlocks=unlocks, xp=xp)
+    db.update_milestone(m["id"], name=name, description=description,
+                        unlocks=unlocks, xp=xp,
+                        auto_close=None if auto_close is None else int(auto_close))
+    if m["is_stub"] and (description or unlocks):
+        db.clear_stub(m["id"])
     fresh = db.get_milestone(interaction.guild_id, key)
+    gate = "closes itself at 100%" if fresh["auto_close"] else "waits for `/tree confirm`"
     await interaction.response.send_message(
-        f"✏️ **{fresh['name']}** — {fresh['unlocks'] or '*no payoff written*'} · {fresh['xp']} XP"
+        f"✏️ **{fresh['name']}** · {fresh['xp']} XP · {gate}\n"
+        f"is: {fresh['description'] or '*no description*'}\n"
+        f"unlocks: {fresh['unlocks'] or '*no payoff written*'}"
     )
+    await push_unlocks(interaction)
 
 
 @tree_group.command(name="requires", description="Make one milestone depend on another")
 @app_commands.autocomplete(key=milestone_autocomplete, prerequisite=milestone_autocomplete)
 async def tree_requires(interaction: discord.Interaction, key: str, prerequisite: str):
     m = db.get_milestone(interaction.guild_id, key)
-    p = db.get_milestone(interaction.guild_id, prerequisite)
-    if not m or not p:
-        await interaction.response.send_message("One of those keys doesn't exist.", ephemeral=True)
+    if not m:
+        await interaction.response.send_message(f"No milestone `{key}`.", ephemeral=True)
         return
-    if m["id"] == p["id"]:
+    pid, created = db.find_or_stub(interaction.guild_id, prerequisite)
+    if m["id"] == pid:
         await interaction.response.send_message("A milestone can't gate itself.", ephemeral=True)
         return
-    db.add_dep(m["id"], p["id"])
-    await interaction.response.send_message(
-        f"🔗 **{m['name']}** now stays locked until **{p['name']}** is done."
-    )
+    db.add_dep(m["id"], pid)
+    for t in db.trees_for_milestone(m["id"]):
+        db.add_to_tree(t["id"], pid)
+    p = db.get_milestone(interaction.guild_id, prerequisite) or \
+        [x for x in db.list_milestones(interaction.guild_id) if x["id"] == pid][0]
+    msg = f"🔗 **{m['name']}** now stays locked until **{p['name']}** is done."
+    if created:
+        msg += (f"\n🌱 **{p['name']}** didn't exist, so I stubbed it in. "
+                f"Describe it with `/tree edit key:{p['key']}`.")
+    await interaction.response.send_message(msg)
 
 
 @tree_group.command(name="link", description="Attach a project to a milestone")
@@ -801,16 +920,122 @@ async def tree_link(interaction: discord.Interaction, key: str, project: str):
     await push_unlocks(interaction)
 
 
-@tree_group.command(name="complete", description="Close a milestone by hand")
+@tree_group.command(name="confirm", description="Sign off a milestone that's waiting on you")
 @app_commands.autocomplete(key=milestone_autocomplete)
-async def tree_complete(interaction: discord.Interaction, key: str):
+@app_commands.describe(
+    credit="Who to split the XP between — @mentions or names, comma separated"
+)
+async def tree_confirm(interaction: discord.Interaction, key: str, credit: str = ""):
     m = db.get_milestone(interaction.guild_id, key)
     if not m:
         await interaction.response.send_message(f"No milestone `{key}`.", ephemeral=True)
         return
-    db.complete_milestone(m["id"])
-    await interaction.response.send_message(f"✅ Marked **{m['name']}** complete.")
+    node = next((n for n in db.tree_state(interaction.guild_id) if n["id"] == m["id"]), None)
+    if node and node["state"] == "complete":
+        await interaction.response.send_message(
+            f"**{m['name']}** is already signed off.", ephemeral=True
+        )
+        return
+    ids, missing = parse_people(interaction.guild, credit)
+    db.complete_milestone(m["id"], interaction.user.id, ids or None)
+    warn = ""
+    if ids:
+        each = m["xp"] // len(ids)
+        warn += f"\nSplitting {m['xp']} XP evenly — {each} each to {len(ids)} people."
+    if missing:
+        warn += f"\n⚠️ Couldn't find: {', '.join(missing)} — they got nothing."
+    if node and node["pct"] < 100:
+        warn = (f"\n⚠️ Only {node['pct']}% of its tasks were done — "
+                f"confirming anyway, which is a legitimate override but worth saying out loud.")
+    await interaction.response.send_message(
+        f"🖊️ <@{interaction.user.id}> signed off **{m['name']}**.{warn}"
+    )
     await push_unlocks(interaction)
+
+
+@tree_group.command(name="complete", description="Close a milestone by hand")
+@app_commands.autocomplete(key=milestone_autocomplete)
+@app_commands.describe(credit="Who to split the XP between — @mentions or names")
+async def tree_complete(interaction: discord.Interaction, key: str, credit: str = ""):
+    m = db.get_milestone(interaction.guild_id, key)
+    if not m:
+        await interaction.response.send_message(f"No milestone `{key}`.", ephemeral=True)
+        return
+    ids, missing = parse_people(interaction.guild, credit)
+    db.complete_milestone(m["id"], interaction.user.id, ids or None)
+    tail = f" Splitting XP between {len(ids)} people." if ids else ""
+    if missing:
+        tail += f" ⚠️ Couldn't find: {', '.join(missing)}."
+    await interaction.response.send_message(
+        f"✅ <@{interaction.user.id}> marked **{m['name']}** complete.{tail}"
+    )
+    await push_unlocks(interaction)
+
+
+@tree_group.command(name="import", description="Load a plan from an attached spreadsheet")
+@app_commands.describe(file="A .csv or .yaml plan — drag it straight onto the message box")
+async def tree_import(interaction: discord.Interaction, file: discord.Attachment):
+    if not file.filename.lower().endswith((".csv", ".tsv", ".yaml", ".yml")):
+        await interaction.response.send_message(
+            "That needs to be a `.csv` or `.yaml` file. Build one at `planner.html` "
+            "if you don't have one yet.", ephemeral=True,
+        )
+        return
+    if file.size > 1_000_000:
+        await interaction.response.send_message(
+            "That file is too big — plans should be a few kilobytes.", ephemeral=True
+        )
+        return
+
+    await interaction.response.defer()
+    try:
+        text = (await file.read()).decode("utf-8-sig", errors="replace")
+        doc = seed.parse(text, file.filename)
+    except Exception as err:
+        await interaction.followup.send(
+            f"Couldn't read that file: `{type(err).__name__}`. "
+            f"If you exported from a spreadsheet, choose **CSV** rather than the "
+            f"native format.", ephemeral=True,
+        )
+        return
+
+    pv = seed.preview(doc, interaction.guild_id)
+    embed = wizard.preview_embed(pv, file.filename)
+    if embed.colour == discord.Color.red() and not pv["created"] and not pv["updated"]:
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        return
+    await interaction.followup.send(
+        embed=embed, view=wizard.ImportConfirm(doc, interaction.user.id, file.filename)
+    )
+
+
+@tree_group.command(name="history", description="Who closed what, and when")
+@app_commands.autocomplete(tree=tree_autocomplete)
+async def tree_history(interaction: discord.Interaction, tree: str | None = None):
+    rows = db.closure_history(interaction.guild_id, tree)
+    if not rows:
+        await interaction.response.send_message(
+            "Nothing has been closed yet.", ephemeral=True
+        )
+        return
+    lines = []
+    for r in rows[:20]:
+        when = int(datetime.fromisoformat(r["completed_at"]).timestamp())
+        who = f"<@{r['completed_by']}>" if r["completed_by"] else "auto"
+        credited = [c for c in (r["credited"] or "").split(",") if c]
+        share = ""
+        if credited:
+            share = " · credited " + ", ".join(f"<@{c}>" for c in credited[:4])
+            if len(credited) > 4:
+                share += f" +{len(credited) - 4}"
+        lines.append(f"**{r['name']}** — <t:{when}:D> by {who}{share}")
+    e = discord.Embed(
+        title="Closure history" + (f" — {tree}" if tree else ""),
+        description="\n".join(lines),
+        colour=discord.Color.green(),
+    )
+    e.set_footer(text=f"{len(rows)} milestone(s) closed")
+    await interaction.response.send_message(embed=e)
 
 
 @tree_group.command(name="remove", description="Delete a milestone")
@@ -823,6 +1048,54 @@ async def tree_remove(interaction: discord.Interaction, key: str):
         return
     db.delete_milestone(m["id"])
     await interaction.response.send_message(f"🗑️ Removed **{m['name']}**.")
+
+
+@bot.tree.command(name="start", description="Guided setup — build a tree with fill-in-the-blank forms")
+@app_commands.guild_only()
+async def start(interaction: discord.Interaction):
+    await interaction.response.send_modal(wizard.TreeModal())
+
+
+@bot.tree.command(name="help", description="How the pieces fit together")
+@app_commands.guild_only()
+async def help_cmd(interaction: discord.Interaction):
+    e = discord.Embed(
+        title="How this works",
+        description=(
+            "There are only two ideas.\n\n"
+            "**Milestones** are the boxes on the tree. They have prerequisites "
+            "(what must finish first) and a payoff (what they unlock).\n\n"
+            "**Tasks** are the small steps inside one milestone. They have no "
+            "prerequisites of their own — they just tick a milestone toward 100%.\n\n"
+            "When every task under a milestone is done, the milestone unlocks "
+            "whatever was waiting on it."
+        ),
+        colour=discord.Color.blurple(),
+    )
+    e.add_field(
+        name="Easiest way in",
+        value="**`/start`** — a pop-up form. Name the tree, then fill in up to four "
+              "milestones, typing their steps one per line. Everything gets wired "
+              "together for you.",
+        inline=False,
+    )
+    e.add_field(
+        name="Day to day",
+        value="`/next` — what to work on\n"
+              "`/tree show` — the picture\n"
+              "`/task done` — tick something off\n"
+              "`/me` — your open steps",
+        inline=False,
+    )
+    e.add_field(
+        name="Adding more later",
+        value="`/tree add` — another milestone\n"
+              "`/task add` — another step\n"
+              "`/tree requires` — connect two milestones\n"
+              "`seed.py` — bulk-load a whole tree from a file",
+        inline=False,
+    )
+    await interaction.response.send_message(embed=e, ephemeral=True)
 
 
 @bot.tree.command(name="next", description="What's closest to unlocking, and what's in the way")
@@ -838,6 +1111,28 @@ async def next_up(interaction: discord.Interaction, tree: str | None = None):
         return
     by_key = {n["key"]: n for n in nodes}
     e = discord.Embed(title="What's next", colour=discord.Color.gold())
+
+    stubs = [n for n in nodes if n.get("is_stub") and not n.get("external_from")]
+    if stubs:
+        e.add_field(
+            name="🌱 Undefined placeholders",
+            value="\n".join(
+                f"**{n['name']}** — `/tree edit key:{n['key']}`" for n in stubs[:5]
+            ) + "\nSomething depends on these, but nobody has said what they are.",
+            inline=False,
+        )
+
+    waiting = [n for n in nodes
+               if n["state"] == "pending" and not n.get("external_from")]
+    if waiting:
+        e.add_field(
+            name="🟣 Waiting on a sign-off",
+            value="\n".join(
+                f"**{n['name']}** — work is done, run `/tree confirm key:{n['key']}`"
+                for n in waiting[:5]
+            ),
+            inline=False,
+        )
 
     ready = [n for n in nodes
              if n["state"] in ("available", "active") and not n.get("external_from")]

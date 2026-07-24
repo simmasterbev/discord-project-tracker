@@ -46,6 +46,8 @@ No privileged intents are required.
 | `/task list project [status] [assignee]` | Filtered view |
 | `/task delete task_id` | Remove a task |
 | `/me` | Your open tasks across all projects (private) |
+| `/start` | Guided form-based setup |
+| `/help` | Plain-language explainer |
 | `/digest set channel [weekday] [hour]` | Weekly summary + overdue list |
 
 ### Tech tree
@@ -58,7 +60,10 @@ No privileged intents are required.
 | `/tree include key tree` · `exclude` | File a milestone into / out of a tree |
 | `/tree drop tree` | Delete a view (milestones survive) |
 | `/tree add key name unlocks requires xp tree` | Add a milestone, optionally filed into a tree |
-| `/tree edit key [name] [unlocks] [xp]` | Change a milestone after the fact |
+| `/tree edit key [name] [description] [unlocks] [xp] [auto_close]` | Change a milestone after the fact |
+| `/tree confirm key [credit]` | Sign off a milestone; optionally name who splits the XP |
+| `/tree history [tree]` | Who closed what, and when |
+| `/tree import file:` | Load a plan from an attached spreadsheet |
 | `/tree requires key prerequisite` | Gate one milestone behind another |
 | `/tree link key project` | Attach a project's tasks to a milestone |
 | `/tree complete key` | Close a milestone by hand |
@@ -76,6 +81,91 @@ No privileged intents are required.
 - **Permissions.** Anyone can create projects and tasks; only the project owner
   or someone with Manage Server can archive or delete.
 - **Backups.** The whole dataset is `tracker.db`. Copy that file.
+
+## The two ideas
+
+Everything rests on one distinction, and it's the only thing worth learning:
+
+- **Milestones** are the boxes on the tree. They have **prerequisites** (what must
+  finish first) and a **payoff** (what they unlock).
+- **Tasks** are the small steps inside one milestone. They have no prerequisites
+  of their own — they just tick a milestone toward 100%.
+
+If you find yourself wanting to give a *task* a prerequisite, that task is really
+a milestone. Promote it.
+
+## Easiest way in: `/start`
+
+`/start` opens a pop-up form. Name the tree, then press **Add milestone** up to
+four times. Each milestone is one screen with five labelled boxes:
+
+| Box | Example |
+|---|---|
+| Milestone name | Venue booked |
+| What is it? | Call three halls, compare quotes, sign, pay the deposit |
+| What does finishing it make possible? | the date becomes announceable |
+| Must come after… | Funding secured, Scope locked |
+| XP when it unlocks | 250 |
+
+Four is the cap because a Discord form allows five inputs and because a first
+tree with more than four boxes is usually one nobody reads. Add more afterwards
+with `/tree add`.
+
+### Stubs
+
+Prerequisites are matched **by name**. Anything that doesn't exist yet is created
+as a **stub** — a placeholder node rendered in grey as **NEEDS DEFINING**.
+
+This is what makes top-down sketching possible. Start from the thing you actually
+want ("Promo campaign live"), name what it waits on, and the gates appear as
+placeholders. Fill them in on a later pass with `/tree edit` — supplying a
+description or a payoff clears the stub flag automatically. `/next` lists any
+still undefined.
+
+Stubs behave like ordinary milestones otherwise: they gate their dependents and
+can be completed. They just look unfinished, because they are.
+
+### Ways in that aren't Discord
+
+| Route | Who it's for |
+|---|---|
+| **`/tree import`** | Drag a `.csv` onto the Discord message box and attach it to the command. The bot shows a preview of exactly what it will create, change, or stub — nothing is written until you press **Apply**. |
+| **`planner.html`** | Open it in any browser — no install, no server, nothing sent anywhere. Fill in milestones, tick which ones come first, watch the tree assemble, download a spreadsheet. |
+| **A spreadsheet** | Columns: `tree, milestone, description, unlocks, requires, xp, auto_close`. One row per milestone, semicolons between multiple prerequisites. Edit in Excel or Google Sheets, export as CSV. |
+| **A YAML file** | Same structure, better for version control. See `example_tree.yaml`. |
+
+The last two end at the same place, either through Discord with `/tree import`
+or from a shell:
+
+```bash
+python seed.py your-plan.csv --guild YOUR_SERVER_ID
+```
+
+`/tree import` needs no server access at all, which makes it the route to give
+anyone who isn't going to SSH anywhere.
+
+Re-running updates rather than duplicating, so the file stays the source of truth
+if you want it to. Prerequisites naming something the file doesn't define become
+stubs.
+
+### Milestones without tasks
+
+A milestone with no linked project can't track itself, so it stays at 0% until
+someone runs `/tree confirm`. That's the normal case for a tree built through
+`/start` — the description carries the detail, and the node is a yes/no.
+
+### How XP is split
+
+Always an **even split**, never weighted. In priority order:
+
+1. Names given at close time — `/tree confirm key:x credit:"@ana @ben @cy"`.
+   Accepts mentions, IDs, or plain display names.
+2. Everyone who closed a task under the milestone.
+3. Whoever signed it off, if there's nobody else.
+
+Remainders go to the first names, so 100 XP across three people is 34/33/33.
+
+`/help` prints the same explanation in-channel.
 
 ## Filling it in
 
@@ -105,6 +195,55 @@ defined further down the file.
 
 Run it on the server with the bot stopped, or against a copy of `tracker.db` and
 copy it back.
+
+## What a node shows
+
+Each card carries: state tag, XP, milestone name, **description** (what it is),
+progress bar, **unlocks** (what it buys you), and **who's on it**.
+
+The people row answers a different question depending on state. On a live
+milestone it lists whoever holds *open* tasks — the useful mid-flight question is
+who to nudge. On a completed one it lists whoever actually closed the work, in
+contribution order, which is who earned the XP.
+
+Names are resolved through a REST fetch when the member isn't cached, so this
+works without the privileged members intent.
+
+## Closure record
+
+Every closed milestone keeps who signed it and when. It shows in three places:
+on the node itself (the footer switches from the payoff line to
+`closed by Ana · 23 Jul`), in `/tree history`, and in the credit ledger behind
+`/leaderboard`. Auto-closed milestones record `auto` as the signer, since no
+human pressed anything.
+
+## Schema changes
+
+New columns are applied on startup by `_migrate()` in `db.py`, which checks
+`PRAGMA table_info` and issues an `ALTER TABLE` only when the column is missing.
+Existing databases upgrade in place with no data loss — you'll see a
+`[db] migrated:` line in the journal the first time. Take a backup first anyway.
+
+## Auto-close vs sign-off
+
+Each milestone carries `auto_close`, defaulting to **true**.
+
+- **true** — the node flips to complete the moment its linked projects hit 100%.
+- **false** — the node enters **NEEDS SIGN-OFF** (purple) instead. Downstream
+  stays locked and **no XP is paid** until someone runs `/tree confirm`.
+
+The distinction matters because "every task I wrote down is done" and "this is
+genuinely achieved" are different claims, and they diverge exactly when someone
+under-scoped the list. Cheap, well-understood milestones should close themselves.
+The two or three that other people's plans hang on are worth a human saying yes.
+
+When a sign-off milestone reaches 100%, the bot posts a purple notice once. If
+the work reopens, the notice resets and fires again when it returns. `/next`
+lists anything waiting.
+
+`/tree confirm` on a milestone below 100% works — sometimes scope legitimately
+changes — but it says the percentage out loud in the channel so the override is
+visible rather than quiet.
 
 ## How the tech tree works
 
