@@ -27,6 +27,19 @@ privileged Discord intents.
 
 ---
 
+## Taxonomy, difficulty, privacy (newest layer)
+
+Projects/trees/milestones carry **group·region·team**, each a value or
+`Universal`, inheriting downward. Dropdowns are scope-filtered so you only link
+within your group — cross-group links need the typed `/tree requires` and post a
+notice. Setting `Universal` is role-gated. Milestones have a **difficulty** 1–10
+(half-steps, pips on the box) and a **private** flag that renders the description
+as 🔒 and gates its text to assignees/roles/managers. `/milestone update` appends
+UTC audit lines. Any command can be role-gated via `/config permission`.
+
+Privacy is **not compliance-grade** — plaintext in the DB, visible to Discord.
+Documented as such.
+
 ## The core model — get this right first
 
 Two ideas, and conflating them is the single most likely way to break things:
@@ -133,8 +146,11 @@ Discord.
 
 ## Known gaps, highest value first
 
-0. **Deploy it.** Nothing past the first live test has run on Discord.
-1. **Tests exist now** — `python -m unittest discover tests`, 36 of them. They
+0. **Deploy it.** Nothing past the first live test has run on Discord — and the
+   Stage-2 guided wizard (modal→select→modal chains) has *only* been verified to
+   construct, never clicked through in a live client. That's the biggest untested
+   surface in the codebase.
+1. **Tests exist now** — `python -m unittest discover tests`, 59 of them. They
    were mutation-checked: breaking the cycle guard, the even split, the
    double-mint guard, `auto_close`, weighted progress, the credit list, or the
    bulk-query map each makes them fail. Two mutations they do *not* catch are

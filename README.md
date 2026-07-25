@@ -59,13 +59,18 @@ No privileged intents are required.
 | `/tree list` | Every tree with its progress |
 | `/tree include key tree` · `exclude` | File a milestone into / out of a tree |
 | `/tree drop tree` | Delete a view (milestones survive) |
-| `/tree add key name unlocks requires xp tree` | Add a milestone, optionally filed into a tree |
+| `/tree add … difficulty private group region team` | Add a milestone with difficulty, privacy, and tags |
 | `/tree edit key [name] [description] [unlocks] [xp] [auto_close]` | Change a milestone after the fact |
 | `/tree confirm key [credit]` | Sign off a milestone; optionally name who splits the XP |
 | `/tree history [tree]` | Who closed what, and when |
 | `/tree import file:` | Load a plan from an attached spreadsheet |
 | `/config signoff role:` | Which role may sign off milestones |
 | `/config layout orientation:` | Left-to-right or top-to-bottom, server-wide |
+| `/config tag-add / tag-remove / tags` | Manage group, region, and team values |
+| `/config permission / permissions` | Restrict a command to a role |
+| `/config universal-role` | Who may set things Universal |
+| `/milestone update key note` | Append a timestamped note to a milestone |
+| `/milestone history key` | The full update log |
 | `/tree show orientation:` | Pick the orientation for this image |
 | `/tree requires key prerequisite` | Gate one milestone behind another |
 | `/tree link key project` | Attach a project's tasks to a milestone |
@@ -252,6 +257,70 @@ New columns are applied on startup by `_migrate()` in `db.py`, which checks
 `PRAGMA table_info` and issues an `ALTER TABLE` only when the column is missing.
 Existing databases upgrade in place with no data loss — you'll see a
 `[db] migrated:` line in the journal the first time. Take a backup first anyway.
+
+## Group, region, team
+
+Every project, tree, and milestone carries three independent labels — **group**,
+**region**, **team** — each either a named value or **Universal**. Milestones
+inherit all three from the tree they're filed under, and can be retagged later.
+The rendered box shows the non-Universal labels in its lower-left corner.
+
+These drive dropdown visibility. In the guided flow and in scope-aware pickers, a
+milestone from another group is hidden — you can only link to your own group's
+milestones plus anything Universal. That stops cross-group edits by accident.
+
+Cross-group dependencies are still possible, deliberately: the typed
+`/tree requires` will link across groups and posts a notice naming both, so the
+other group sees it even though they didn't have to approve it. Milestone
+creation is already role-gated, so this is mistake-proofing, not access control.
+
+Setting something **Universal** is itself gated — `/config universal-role` names
+who may, defaulting to Manage Server — so Universal can't be used to quietly make
+something visible everywhere.
+
+## Difficulty
+
+Each milestone has a difficulty from 1 to 10, half-steps allowed, set at creation
+and editable after (default 1). It renders as ten pips along the top of the box —
+solid, half, or hollow. It's a label, not a mechanic: nothing keys off it yet,
+but it gives the board a sense of where the hard work sits.
+
+## Private descriptions
+
+A milestone marked `private` hides its description. On the rendered image the box
+shows **🔒 restricted** instead of the text. The actual description — and its
+update log — is readable only by task assignees, a permitted role
+(`/config permission command:milestone_private role:…`), or a server manager.
+
+This hides descriptions from casual view in a shared channel. It is **not
+compliance-grade**: the text still lives in the bot's database in plain form, and
+Discord itself can see anything the bot sends. Don't store data you'd be liable
+for leaking; store the fact that something is sensitive and handle the detail
+elsewhere.
+
+## Milestone update log
+
+`/milestone update` appends a timestamped, attributed line to a milestone's
+description rather than overwriting it:
+
+> [2026-07-24 19:32 UTC] @Darius: Hall confirmed, deposit paid
+
+Timestamps are UTC — Discord can't tell the bot a user's timezone, and one shared
+clock beats several guessed ones. The full history lives in a separate audit
+table (`/milestone history`) and survives even when the description field fills
+and older lines scroll off.
+
+## Role-gated commands
+
+Beyond Discord's own permissions, any command can be restricted to a role:
+
+```
+/config permission command:tree_import role:@Coordinators
+```
+
+Manage Server always passes and can't be locked out. `/config permissions` lists
+what's gated. This is a bot-level layer on top of Discord's own command-permission
+settings — the two are separate systems.
 
 ## Auto-close vs sign-off
 

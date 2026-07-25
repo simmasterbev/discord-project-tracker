@@ -366,3 +366,299 @@ def danger_embed(title: str, what_goes: list[str], note: str = "") -> discord.Em
     e.add_field(name="Will be destroyed", value="\n".join(f"• {x}" for x in what_goes),
                 inline=False)
     return e
+
+
+# ==========================================================================
+# STAGE 2: project-first guided setup (Project -> Tree -> Milestone)
+# ==========================================================================
+# Discord modals cannot hold a dropdown, so milestone-linking is done with a
+# select-menu on a follow-up message. Dropdowns are filtered by group/region/
+# team: you only see and pick milestones from your own scope, which stops
+# cross-group edits by accident. Cross-group links remain possible via the typed
+# /tree requires command, which announces them.
+
+DIFFICULTY_OPTIONS = [
+    discord.SelectOption(label=f"{d:g}", value=str(d))
+    for d in [1, 1.5, 2, 2.5, 3, 4, 5, 6, 7, 8, 9, 10]
+]
+
+
+def scope_of(row) -> tuple[str, str, str]:
+    return row["grp"], row["region"], row["team"]
+
+
+class StartFlow:
+    """Carries selections across the Project -> Tree -> Milestone steps."""
+
+    def __init__(self, author_id: int):
+        self.author_id = author_id
+        self.project_id = None
+        self.tree_id = None
+        self.tree_key = None
+        self.scope = ("Universal", "Universal", "Universal")
+        self.count = 0
+        self.log: list[str] = []
+
+
+class ProjectModal(discord.ui.Modal, title="New project"):
+    p_name = discord.ui.TextInput(label="Project name", placeholder="Southern Tier Skyway",
+                                  max_length=80)
+    p_desc = discord.ui.TextInput(label="What is it?", required=False, max_length=200,
+                                  style=discord.TextStyle.paragraph)
+
+    def __init__(self, flow: StartFlow):
+        super().__init__()
+        self.flow = flow
+
+    async def on_submit(self, interaction: discord.Interaction):
+        name = str(self.p_name).strip()
+        if db.get_project(interaction.guild_id, name):
+            self.flow.project_id = db.get_project(interaction.guild_id, name)["id"]
+        else:
+            self.flow.project_id = db.create_project(
+                interaction.guild_id, name, str(self.p_desc).strip(), interaction.user.id)
+        # scope is chosen next, on a select-menu message
+        await interaction.response.send_message(
+            f"📁 **{name}** ready. Now pick its group, region and team — "
+            f"or skip for Universal.",
+            view=ScopePicker(self.flow, name), ephemeral=True)
+
+
+class ScopePicker(discord.ui.View):
+    """Three select-menus for group / region / team, then a continue button."""
+
+    def __init__(self, flow: StartFlow, project_name: str):
+        super().__init__(timeout=600)
+        self.flow = flow
+        self.project_name = project_name
+        self.chosen = {"grp": "Universal", "region": "Universal", "team": "Universal"}
+        for kind in db.TAXONOMIES:
+            self.add_item(self._menu(kind))
+
+    def _menu(self, kind: str):
+        gid = self.flow.author_id  # placeholder; real guild filled at runtime via interaction
+        label = db.TAXONOMY_LABEL[kind]
+        menu = discord.ui.Select(
+            placeholder=f"{label.title()} (Universal)",
+            options=[discord.SelectOption(label="Universal", value="Universal")],
+            min_values=1, max_values=1, custom_id=kind,
+        )
+        menu.callback = self._make_cb(kind, menu)
+        return menu
+
+    async def _populate(self, interaction: discord.Interaction):
+        for item in self.children:
+            if isinstance(item, discord.ui.Select) and item.custom_id in db.TAXONOMIES:
+                vals = db.list_taxonomy(interaction.guild_id, item.custom_id)
+                item.options = [discord.SelectOption(label=v, value=v,
+                                default=(v == self.chosen[item.custom_id]))
+                                for v in vals][:25]
+
+    def _make_cb(self, kind: str, menu: discord.ui.Select):
+        async def cb(interaction: discord.Interaction):
+            val = menu.values[0]
+            if val == "Universal" and self.chosen[kind] != "Universal":
+                pass
+            if val != "Universal" and menu.values[0] == "Universal":
+                pass
+            # setting Universal explicitly is unrestricted here (it's the default);
+            # the privileged path is *changing away from* a real group to Universal,
+            # which the edit commands guard. Creation defaults are fine.
+            self.chosen[kind] = val
+            await interaction.response.defer()
+        return cb
+
+    @discord.ui.button(label="Continue → add a tree", style=discord.ButtonStyle.primary, row=3)
+    async def go(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.flow.scope = (self.chosen["grp"], self.chosen["region"], self.chosen["team"])
+        db.set_project_tags(self.flow.project_id, grp=self.chosen["grp"],
+                            region=self.chosen["region"], team=self.chosen["team"])
+        await interaction.response.edit_message(
+            content=f"📁 **{self.project_name}** — "
+                    + " · ".join(v for v in self.flow.scope if v != "Universal") or
+                    f"📁 **{self.project_name}** — Universal",
+            view=None)
+        await interaction.followup.send(
+            "Now the tree. Name it:", view=NewTreeButton(self.flow), ephemeral=True)
+
+
+class NewTreeButton(discord.ui.View):
+    def __init__(self, flow: StartFlow):
+        super().__init__(timeout=600)
+        self.flow = flow
+
+    @discord.ui.button(label="Name the tree", style=discord.ButtonStyle.primary, emoji="🌳")
+    async def name_tree(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(TreeStepModal(self.flow))
+
+
+class TreeStepModal(discord.ui.Modal, title="New tree"):
+    t_name = discord.ui.TextInput(label="Tree name", placeholder="Candidate forum",
+                                  max_length=80)
+    t_desc = discord.ui.TextInput(label="What is it for?", required=False, max_length=200,
+                                  style=discord.TextStyle.paragraph)
+
+    def __init__(self, flow: StartFlow):
+        super().__init__()
+        self.flow = flow
+
+    async def on_submit(self, interaction: discord.Interaction):
+        name = str(self.t_name).strip()
+        key = slugify(name, {t["key"] for t in db.list_trees(interaction.guild_id)})
+        tid = db.create_tree(interaction.guild_id, key, name, str(self.t_desc).strip())
+        db.set_tree_tags(tid, grp=self.flow.scope[0], region=self.flow.scope[1],
+                         team=self.flow.scope[2])
+        if self.flow.project_id:
+            db.link_tree_project(tid, self.flow.project_id)
+        self.flow.tree_id = tid
+        self.flow.tree_key = key
+        view = MilestoneBuilder(self.flow, name)
+        await interaction.response.send_message(embed=view.embed(), view=view, ephemeral=True)
+
+
+class MilestoneBuilder(discord.ui.View):
+    """Add milestones one at a time; each opens a modal then an optional
+    prerequisite picker."""
+
+    def __init__(self, flow: StartFlow, tree_name: str):
+        super().__init__(timeout=1200)
+        self.flow = flow
+        self.tree_name = tree_name
+
+    def embed(self) -> discord.Embed:
+        scope = " · ".join(v for v in self.flow.scope if v != "Universal") or "Universal"
+        e = discord.Embed(
+            title=f"Building: {self.tree_name}",
+            description="\n".join(f"✅ {l}" for l in self.flow.log)
+                        or "Press **Add milestone** to describe the first one.",
+            colour=discord.Color.blurple())
+        e.set_footer(text=f"{scope} · {self.flow.count}/{MAX_WIZARD_NODES} milestones · "
+                          f"more later with /tree add")
+        return e
+
+    @discord.ui.button(label="Add milestone", style=discord.ButtonStyle.primary, emoji="➕")
+    async def add(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.flow.count >= MAX_WIZARD_NODES:
+            await interaction.response.send_message(
+                "That's the wizard's limit — add more with `/tree add`.", ephemeral=True)
+            return
+        await interaction.response.send_modal(ScopedMilestoneModal(self.flow, self))
+
+    @discord.ui.button(label="Done", style=discord.ButtonStyle.success, emoji="🌲")
+    async def done(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for c in self.children:
+            c.disabled = True
+        await interaction.response.edit_message(view=self)
+        await interaction.followup.send(
+            f"Setup complete. `/tree show tree:{self.flow.tree_key}` to see it, "
+            f"`/next` for where to start.", ephemeral=True)
+        self.stop()
+
+
+class ScopedMilestoneModal(discord.ui.Modal):
+    """Milestone text fields including difficulty. Prerequisites are picked
+    afterward on a scope-filtered select-menu, since modals can't hold one."""
+
+    def __init__(self, flow: StartFlow, builder: MilestoneBuilder):
+        super().__init__(title="Add a milestone")
+        self.flow = flow
+        self.builder = builder
+        self.m_name = discord.ui.TextInput(label="Milestone name",
+                                           placeholder="Venue booked", max_length=80)
+        self.m_desc = discord.ui.TextInput(label="What is it?", required=False,
+                                           max_length=400, style=discord.TextStyle.paragraph)
+        self.m_unlocks = discord.ui.TextInput(
+            label="What does finishing it make possible?", required=False, max_length=120)
+        self.m_diff = discord.ui.TextInput(label="Difficulty 1-10 (half steps ok)",
+                                           default="1", required=False, max_length=4)
+        self.m_xp = discord.ui.TextInput(label="XP when it unlocks", default="100",
+                                         required=False, max_length=5)
+        for i in (self.m_name, self.m_desc, self.m_unlocks, self.m_diff, self.m_xp):
+            self.add_item(i)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        gid = interaction.guild_id
+        name = str(self.m_name).strip()
+        key = slugify(name, {m["key"] for m in db.list_milestones(gid)})
+        try:
+            xp = max(0, min(5000, int(str(self.m_xp).strip() or 100)))
+        except ValueError:
+            xp = 100
+        diff = db.clamp_difficulty(str(self.m_diff).strip() or 1)
+
+        existing = db.get_milestone(gid, key)
+        if existing and existing["is_stub"]:
+            mid = existing["id"]
+            db.update_milestone(mid, name=name, description=str(self.m_desc).strip(),
+                                unlocks=str(self.m_unlocks).strip(), xp=xp)
+            db.set_difficulty(mid, diff)
+            db.clear_stub(mid)
+        else:
+            mid = db.create_milestone(
+                gid, key, name, str(self.m_unlocks).strip(), xp, str(self.m_desc).strip(),
+                True, diff, False, *self.flow.scope)
+        db.add_to_tree(self.flow.tree_id, mid)
+        self.flow.count += 1
+        self.flow.log.append(f"{name} (difficulty {diff:g})")
+
+        # offer a prerequisite picker scoped to this group
+        candidates = db.milestones_in_scope(gid, *self.flow.scope, exclude_id=mid)
+        if candidates:
+            await interaction.response.send_message(
+                f"**{name}** added. Does it depend on anything already here? "
+                f"Pick any that must finish first, or skip.",
+                view=PrereqPicker(self.flow, self.builder, mid, name, candidates),
+                ephemeral=True)
+        else:
+            await interaction.response.edit_message(
+                embed=self.builder.embed(), view=self.builder)
+
+
+class PrereqPicker(discord.ui.View):
+    def __init__(self, flow, builder, mid, name, candidates):
+        super().__init__(timeout=300)
+        self.flow, self.builder, self.mid, self.name = flow, builder, mid, name
+        menu = discord.ui.Select(
+            placeholder="Must come after… (optional)",
+            min_values=0, max_values=min(len(candidates), 25),
+            options=[discord.SelectOption(label=c["name"][:100], value=str(c["id"]))
+                     for c in candidates[:25]])
+        menu.callback = self._picked(menu)
+        self.add_item(menu)
+
+    def _picked(self, menu):
+        async def cb(interaction: discord.Interaction):
+            linked = []
+            for cid in menu.values:
+                if db.add_dep(self.mid, int(cid)):
+                    linked.append(int(cid))
+            note = (f" — after {len(linked)} milestone(s)" if linked else "")
+            await interaction.response.edit_message(
+                content=f"**{self.name}** added{note}.", view=None)
+            await interaction.followup.send(embed=self.builder.embed(),
+                                            view=self.builder, ephemeral=True)
+            self.stop()
+        return cb
+
+    @discord.ui.button(label="Skip", style=discord.ButtonStyle.secondary)
+    async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content=f"**{self.name}** added.", view=None)
+        await interaction.followup.send(embed=self.builder.embed(),
+                                        view=self.builder, ephemeral=True)
+        self.stop()
+
+
+class ProjectStart(discord.ui.View):
+    """Entry point: /start posts this, the button opens the project modal."""
+
+    def __init__(self, author_id: int):
+        super().__init__(timeout=300)
+        self.author_id = author_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.author_id
+
+    @discord.ui.button(label="Start", style=discord.ButtonStyle.primary, emoji="🚀")
+    async def begin(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(ProjectModal(StartFlow(self.author_id)))

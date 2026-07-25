@@ -26,6 +26,9 @@ CREATE TABLE IF NOT EXISTS projects (
     status      TEXT    NOT NULL DEFAULT 'active',   -- active | archived
     owner_id    INTEGER NOT NULL,
     created_at  TEXT    NOT NULL,
+    grp         TEXT    NOT NULL DEFAULT 'Universal',
+    region      TEXT    NOT NULL DEFAULT 'Universal',
+    team        TEXT    NOT NULL DEFAULT 'Universal',
     UNIQUE (guild_id, name)
 );
 
@@ -76,6 +79,11 @@ CREATE TABLE IF NOT EXISTS milestones (
     is_stub      INTEGER NOT NULL DEFAULT 0,    -- named as a dependency, not yet defined
     completed_by INTEGER,
     credit_ids   TEXT,                          -- explicit even-split credit list
+    grp          TEXT NOT NULL DEFAULT 'Universal',
+    region       TEXT NOT NULL DEFAULT 'Universal',
+    team         TEXT NOT NULL DEFAULT 'Universal',
+    difficulty   REAL NOT NULL DEFAULT 1,        -- 1..10, half steps
+    private      INTEGER NOT NULL DEFAULT 0,
     UNIQUE (guild_id, key)
 );
 
@@ -107,6 +115,10 @@ CREATE TABLE IF NOT EXISTS trees (
     name        TEXT    NOT NULL,
     description TEXT    NOT NULL DEFAULT '',
     created_at  TEXT    NOT NULL,
+    grp         TEXT    NOT NULL DEFAULT 'Universal',
+    region      TEXT    NOT NULL DEFAULT 'Universal',
+    team        TEXT    NOT NULL DEFAULT 'Universal',
+    project_id  INTEGER,
     UNIQUE (guild_id, key)
 );
 
@@ -122,6 +134,28 @@ CREATE INDEX IF NOT EXISTS idx_projects_guild ON projects(guild_id);
 -- Scaffolding only for now: thresholds, names, and a free-text `perk` that
 -- describes what the level is meant to grant. Acting on a perk (granting a
 -- Discord role, unlocking a command, whatever) belongs in LEVEL_HOOKS below.
+CREATE TABLE IF NOT EXISTS taxonomy (
+    guild_id  INTEGER NOT NULL,
+    kind      TEXT    NOT NULL,          -- grp | region | team
+    value     TEXT    NOT NULL,
+    PRIMARY KEY (guild_id, kind, value)
+);
+
+CREATE TABLE IF NOT EXISTS cmd_perms (
+    guild_id INTEGER NOT NULL,
+    command  TEXT    NOT NULL,
+    role_id  INTEGER NOT NULL,
+    PRIMARY KEY (guild_id, command)
+);
+
+CREATE TABLE IF NOT EXISTS milestone_audit (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    milestone_id INTEGER NOT NULL REFERENCES milestones(id) ON DELETE CASCADE,
+    author_id    INTEGER NOT NULL,
+    body         TEXT    NOT NULL,
+    created_at   TEXT    NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS levels (
     guild_id  INTEGER NOT NULL,
     threshold INTEGER NOT NULL,          -- cumulative XP required
@@ -157,7 +191,24 @@ MIGRATIONS = [
     ("milestones", "credit_ids", "TEXT"),
     ("settings", "signoff_role", "INTEGER"),
     ("settings", "layout", "TEXT NOT NULL DEFAULT 'lr'"),
+    ("settings", "universal_role", "INTEGER"),
+    ("projects", "grp", "TEXT NOT NULL DEFAULT 'Universal'"),
+    ("projects", "region", "TEXT NOT NULL DEFAULT 'Universal'"),
+    ("projects", "team", "TEXT NOT NULL DEFAULT 'Universal'"),
+    ("trees", "grp", "TEXT NOT NULL DEFAULT 'Universal'"),
+    ("trees", "region", "TEXT NOT NULL DEFAULT 'Universal'"),
+    ("trees", "team", "TEXT NOT NULL DEFAULT 'Universal'"),
+    ("trees", "project_id", "INTEGER"),
+    ("milestones", "grp", "TEXT NOT NULL DEFAULT 'Universal'"),
+    ("milestones", "region", "TEXT NOT NULL DEFAULT 'Universal'"),
+    ("milestones", "team", "TEXT NOT NULL DEFAULT 'Universal'"),
+    ("milestones", "difficulty", "REAL NOT NULL DEFAULT 1"),
+    ("milestones", "private", "INTEGER NOT NULL DEFAULT 0"),
 ]
+
+# the three taxonomy dimensions share one shape
+TAXONOMIES = ("grp", "region", "team")
+TAXONOMY_LABEL = {"grp": "group", "region": "region", "team": "team"}
 
 
 def _migrate(c: sqlite3.Connection) -> list[str]:
@@ -1107,3 +1158,206 @@ def _people_from(m: sqlite3.Row, slot: Optional[dict], is_complete: bool) -> lis
             return [int(x) for x in m["credit_ids"].split(",") if x.strip().isdigit()]
         return sorted(slot["done"]) if slot else []
     return slot["open"] if slot else []
+
+
+# ==========================================================================
+# STAGE 1 additions: taxonomy, difficulty, privacy, permissions, audit
+# ==========================================================================
+
+# --- taxonomy (group / region / team) -------------------------------------
+
+def add_taxonomy(guild_id: int, kind: str, value: str) -> None:
+    _exec("INSERT OR IGNORE INTO taxonomy (guild_id, kind, value) VALUES (?, ?, ?)",
+          (guild_id, kind, value.strip()))
+
+
+def remove_taxonomy(guild_id: int, kind: str, value: str) -> None:
+    _exec("DELETE FROM taxonomy WHERE guild_id = ? AND kind = ? AND value = ?",
+          (guild_id, kind, value.strip()))
+
+
+def list_taxonomy(guild_id: int, kind: str) -> list[str]:
+    """Configured values for a dimension, always including Universal."""
+    rows = _q("SELECT value FROM taxonomy WHERE guild_id = ? AND kind = ? "
+              "ORDER BY value COLLATE NOCASE", (guild_id, kind))
+    vals = [r["value"] for r in rows]
+    return ["Universal"] + [v for v in vals if v != "Universal"]
+
+
+def tag_columns(grp: str = None, region: str = None, team: str = None) -> dict:
+    """Only the dimensions that were supplied, for a partial update."""
+    out = {}
+    if grp is not None:
+        out["grp"] = grp
+    if region is not None:
+        out["region"] = region
+    if team is not None:
+        out["team"] = team
+    return out
+
+
+def set_project_tags(project_id: int, **tags) -> None:
+    cols = tag_columns(**tags)
+    if cols:
+        _exec(f"UPDATE projects SET {', '.join(f'{k}=?' for k in cols)} WHERE id=?",
+              (*cols.values(), project_id))
+
+
+def set_tree_tags(tree_id: int, **tags) -> None:
+    cols = tag_columns(**tags)
+    if cols:
+        _exec(f"UPDATE trees SET {', '.join(f'{k}=?' for k in cols)} WHERE id=?",
+              (*cols.values(), tree_id))
+
+
+def set_milestone_tags(milestone_id: int, **tags) -> None:
+    cols = tag_columns(**tags)
+    if cols:
+        _exec(f"UPDATE milestones SET {', '.join(f'{k}=?' for k in cols)} WHERE id=?",
+              (*cols.values(), milestone_id))
+
+
+def visible_filter(grp: str = None, region: str = None, team: str = None,
+                   alias: str = "") -> tuple[str, list]:
+    """SQL fragment: rows in the named group/region/team, plus Universal ones.
+
+    A None dimension isn't constrained. Returns ('' , []) when nothing is set,
+    so callers can append it unconditionally.
+    """
+    a = f"{alias}." if alias else ""
+    clauses, args = [], []
+    for col, val in (("grp", grp), ("region", region), ("team", team)):
+        if val and val != "Universal":
+            clauses.append(f"({a}{col} = ? OR {a}{col} = 'Universal')")
+            args.append(val)
+    return (" AND ".join(clauses), args)
+
+
+# --- difficulty & privacy on create ---------------------------------------
+
+_orig_create_milestone = create_milestone       # noqa: F821  (defined earlier)
+
+
+def create_milestone(guild_id: int, key: str, name: str, unlocks: str = "",
+                     xp: int = 100, description: str = "", auto_close: bool = True,
+                     difficulty: float = 1.0, private: bool = False,
+                     grp: str = "Universal", region: str = "Universal",
+                     team: str = "Universal") -> int:
+    mid = _orig_create_milestone(guild_id, key, name, unlocks, xp, description, auto_close)
+    _exec("UPDATE milestones SET difficulty=?, private=?, grp=?, region=?, team=? "
+          "WHERE id=?",
+          (clamp_difficulty(difficulty), int(bool(private)), grp, region, team, mid))
+    return mid
+
+
+def clamp_difficulty(v) -> float:
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return 1.0
+    v = max(1.0, min(10.0, v))
+    return round(v * 2) / 2               # snap to half steps
+
+
+def set_difficulty(milestone_id: int, value: float) -> None:
+    _exec("UPDATE milestones SET difficulty=? WHERE id=?",
+          (clamp_difficulty(value), milestone_id))
+
+
+def set_private(milestone_id: int, private: bool) -> None:
+    _exec("UPDATE milestones SET private=? WHERE id=?",
+          (int(bool(private)), milestone_id))
+
+
+def can_read_description(guild_id: int, milestone_id: int, user_id: int,
+                         user_role_ids: set[int], is_manager: bool) -> bool:
+    """Private descriptions: assignees, permitted roles, or managers only."""
+    row = _q("SELECT private FROM milestones WHERE id=?", (milestone_id,))
+    if not row or not row[0]["private"]:
+        return True
+    if is_manager:
+        return True
+    perm_role = get_cmd_perm(guild_id, "milestone_private")
+    if perm_role and perm_role in user_role_ids:
+        return True
+    # assignees of any task under this milestone
+    rows = _q("SELECT 1 FROM milestone_projects mp JOIN tasks t ON t.project_id=mp.project_id "
+              "WHERE mp.milestone_id=? AND t.assignee_id=? LIMIT 1", (milestone_id, user_id))
+    return bool(rows)
+
+
+# --- per-command role gates -----------------------------------------------
+
+def set_cmd_perm(guild_id: int, command: str, role_id: Optional[int]) -> None:
+    if role_id is None:
+        _exec("DELETE FROM cmd_perms WHERE guild_id=? AND command=?", (guild_id, command))
+    else:
+        _exec("INSERT INTO cmd_perms (guild_id, command, role_id) VALUES (?, ?, ?) "
+              "ON CONFLICT(guild_id, command) DO UPDATE SET role_id=?",
+              (guild_id, command, role_id, role_id))
+
+
+def get_cmd_perm(guild_id: int, command: str) -> Optional[int]:
+    rows = _q("SELECT role_id FROM cmd_perms WHERE guild_id=? AND command=?",
+              (guild_id, command))
+    return rows[0]["role_id"] if rows else None
+
+
+def list_cmd_perms(guild_id: int) -> list[sqlite3.Row]:
+    return _q("SELECT command, role_id FROM cmd_perms WHERE guild_id=? ORDER BY command",
+              (guild_id,))
+
+
+def set_universal_role(guild_id: int, role_id: Optional[int]) -> None:
+    get_settings(guild_id)
+    _exec("UPDATE settings SET universal_role=? WHERE guild_id=?", (role_id, guild_id))
+
+
+def get_universal_role(guild_id: int) -> Optional[int]:
+    return get_settings(guild_id)["universal_role"]
+
+
+# --- milestone update log (appended into the description) ------------------
+
+def append_milestone_note(milestone_id: int, author_id: int, body: str) -> str:
+    """Records an audit row and returns the stamped line for display.
+
+    Timestamp is UTC by deliberate choice — Discord can't tell the bot a user's
+    local zone, and one shared clock beats several guessed ones.
+    """
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    _exec("INSERT INTO milestone_audit (milestone_id, author_id, body, created_at) "
+          "VALUES (?, ?, ?, ?)", (milestone_id, author_id, body, now()))
+    line = f"[{ts}] <@{author_id}>: {body}"
+    cur = _q("SELECT description FROM milestones WHERE id=?", (milestone_id,))[0]["description"]
+    joined = (cur + "\n" + line) if cur else line
+    _exec("UPDATE milestones SET description=? WHERE id=?", (joined, milestone_id))
+    return line
+
+
+def milestone_audit(milestone_id: int, limit: int = 20) -> list[sqlite3.Row]:
+    return _q("SELECT * FROM milestone_audit WHERE milestone_id=? "
+              "ORDER BY id DESC LIMIT ?", (milestone_id, limit))
+
+
+def link_tree_project(tree_id: int, project_id: int) -> None:
+    _exec("UPDATE trees SET project_id=? WHERE id=?", (project_id, tree_id))
+
+
+def milestones_in_scope(guild_id: int, grp: str = "Universal", region: str = "Universal",
+                        team: str = "Universal", exclude_id: int = None) -> list[sqlite3.Row]:
+    """Milestones a user in this scope should see in a picker: same group/region/
+    team, plus anything Universal. This is the dropdown-visibility rule — it
+    deliberately hides other groups' milestones so they can't be linked by
+    accident."""
+    frag, args = visible_filter(grp=grp, region=region, team=team, alias="m")
+    sql = "SELECT m.* FROM milestones m WHERE m.guild_id = ?"
+    params = [guild_id]
+    if frag:
+        sql += " AND " + frag
+        params += args
+    if exclude_id:
+        sql += " AND m.id != ?"
+        params.append(exclude_id)
+    sql += " ORDER BY m.name COLLATE NOCASE"
+    return _q(sql, tuple(params))

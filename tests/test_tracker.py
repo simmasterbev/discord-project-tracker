@@ -364,3 +364,190 @@ class TestRendering(Base):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# ==========================================================================
+# Stage additions: taxonomy, difficulty, privacy, permissions, audit
+# ==========================================================================
+
+class TestDifficulty(Base):
+    def test_clamps_to_range(self):
+        self.assertEqual(db.clamp_difficulty(0), 1.0)
+        self.assertEqual(db.clamp_difficulty(99), 10.0)
+        self.assertEqual(db.clamp_difficulty(-4), 1.0)
+
+    def test_snaps_to_half_steps(self):
+        self.assertEqual(db.clamp_difficulty(4.3), 4.5)
+        self.assertEqual(db.clamp_difficulty(4.7), 4.5)
+        self.assertEqual(db.clamp_difficulty(4.24), 4.0)
+
+    def test_garbage_defaults_to_one(self):
+        self.assertEqual(db.clamp_difficulty("nonsense"), 1.0)
+        self.assertEqual(db.clamp_difficulty(None), 1.0)
+
+    def test_set_at_creation_and_edited(self):
+        mid = db.create_milestone(G, "a", "A", difficulty=6.5)
+        self.assertEqual(db.get_milestone(G, "a")["difficulty"], 6.5)
+        db.set_difficulty(mid, 2)
+        self.assertEqual(db.get_milestone(G, "a")["difficulty"], 2.0)
+
+
+class TestTaxonomy(Base):
+    def test_universal_always_listed_first(self):
+        db.add_taxonomy(G, "grp", "Aviation")
+        vals = db.list_taxonomy(G, "grp")
+        self.assertEqual(vals[0], "Universal")
+        self.assertIn("Aviation", vals)
+
+    def test_scope_filter_hides_other_groups(self):
+        db.create_milestone(G, "f", "Forum thing", grp="Forum")
+        db.create_milestone(G, "a", "Aviation thing", grp="Aviation")
+        db.create_milestone(G, "u", "Universal thing")
+        seen = {m["name"] for m in db.milestones_in_scope(G, grp="Forum")}
+        self.assertIn("Forum thing", seen)
+        self.assertIn("Universal thing", seen)      # universal always visible
+        self.assertNotIn("Aviation thing", seen)    # other group hidden
+
+    def test_exclude_id_drops_self(self):
+        a = db.create_milestone(G, "a", "A", grp="Forum")
+        b = db.create_milestone(G, "b", "B", grp="Forum")
+        ids = {m["id"] for m in db.milestones_in_scope(G, grp="Forum", exclude_id=a)}
+        self.assertNotIn(a, ids)
+        self.assertIn(b, ids)
+
+    def test_milestone_inherits_then_can_be_retagged(self):
+        mid = db.create_milestone(G, "a", "A", grp="Aviation", region="Broome")
+        self.assertEqual(db.get_milestone(G, "a")["grp"], "Aviation")
+        db.set_milestone_tags(mid, grp="Forum")
+        m = db.get_milestone(G, "a")
+        self.assertEqual(m["grp"], "Forum")
+        self.assertEqual(m["region"], "Broome")     # untouched dimension survives
+
+
+class TestPrivacy(Base):
+    def _private_milestone_with_assignee(self, assignee):
+        mid = db.create_milestone(G, "p", "Private", private=True)
+        pid = db.create_project(G, "w", "", 1)
+        db.link_project(mid, pid)
+        db.add_task(pid, "x", assignee)
+        return mid
+
+    def test_public_description_readable_by_anyone(self):
+        mid = db.create_milestone(G, "a", "A", private=False)
+        self.assertTrue(db.can_read_description(G, mid, 999, set(), False))
+
+    def test_private_hidden_from_strangers(self):
+        mid = self._private_milestone_with_assignee(7)
+        self.assertFalse(db.can_read_description(G, mid, 50, set(), False))
+
+    def test_private_visible_to_assignee(self):
+        mid = self._private_milestone_with_assignee(7)
+        self.assertTrue(db.can_read_description(G, mid, 7, set(), False))
+
+    def test_private_visible_to_manager(self):
+        mid = self._private_milestone_with_assignee(7)
+        self.assertTrue(db.can_read_description(G, mid, 50, set(), True))
+
+    def test_private_visible_to_permitted_role(self):
+        mid = self._private_milestone_with_assignee(7)
+        db.set_cmd_perm(G, "milestone_private", 321)
+        self.assertTrue(db.can_read_description(G, mid, 50, {321}, False))
+
+
+class TestCommandPerms(Base):
+    def test_unset_command_is_open(self):
+        self.assertIsNone(db.get_cmd_perm(G, "tree_import"))
+
+    def test_set_and_clear(self):
+        db.set_cmd_perm(G, "tree_import", 555)
+        self.assertEqual(db.get_cmd_perm(G, "tree_import"), 555)
+        db.set_cmd_perm(G, "tree_import", None)
+        self.assertIsNone(db.get_cmd_perm(G, "tree_import"))
+
+    def test_universal_role_round_trip(self):
+        db.set_universal_role(G, 42)
+        self.assertEqual(db.get_universal_role(G), 42)
+        db.set_universal_role(G, None)
+        self.assertIsNone(db.get_universal_role(G))
+
+
+class TestAudit(Base):
+    def test_note_appends_to_description_and_logs(self):
+        mid = db.create_milestone(G, "a", "A", description="original")
+        db.append_milestone_note(mid, 7, "did a thing")
+        desc = db.get_milestone(G, "a")["description"]
+        self.assertIn("original", desc)
+        self.assertIn("did a thing", desc)
+        self.assertIn("UTC", desc)
+        self.assertEqual(len(db.milestone_audit(mid)), 1)
+
+    def test_history_survives_when_description_would_be_trimmed(self):
+        mid = db.create_milestone(G, "a", "A")
+        for i in range(30):
+            db.append_milestone_note(mid, 7, f"entry {i}")
+        # every entry is in the audit table regardless of description length
+        self.assertEqual(len(db.milestone_audit(mid, limit=100)), 30)
+
+
+class TestRenderingStage3(Base):
+    def _node(self, **kw):
+        base = {"key": "a", "name": "A", "description": "desc", "state": "active",
+                "pct": 50, "xp": 100, "unlocks": "u", "people": [], "difficulty": 3,
+                "private": False, "grp": "Universal", "region": "Universal",
+                "team": "Universal"}
+        base.update(kw)
+        return [base]
+
+    def _text_calls(self, nodes, edges=()):
+        import PIL.ImageDraw as ID
+        calls = []
+        orig = ID.ImageDraw.text
+        ID.ImageDraw.text = lambda self, xy, text, *a, **k: (
+            calls.append(str(text)), orig(self, xy, text, *a, **k))[1]
+        try:
+            tree_render.render_tree(nodes, list(edges), "t", "lr")
+        finally:
+            ID.ImageDraw.text = orig
+        return calls
+
+    def test_private_description_never_reaches_the_canvas(self):
+        calls = self._text_calls(self._node(private=True, description="SECRET DETAIL"))
+        self.assertFalse(any("SECRET DETAIL" in c for c in calls))
+        self.assertTrue(any("restricted" in c for c in calls))
+
+    def test_public_description_is_drawn(self):
+        calls = self._text_calls(self._node(private=False, description="OPEN DETAIL"))
+        self.assertTrue(any("OPEN DETAIL" in c for c in calls))
+
+    def test_non_universal_tags_are_drawn(self):
+        calls = self._text_calls(self._node(grp="Aviation", region="Delaware"))
+        self.assertTrue(any("Aviation" in c and "Delaware" in c for c in calls))
+
+    def test_universal_tags_are_not_drawn(self):
+        calls = self._text_calls(self._node())      # all Universal
+        self.assertFalse(any("Universal" in c for c in calls))
+
+    def test_difficulty_pip_states_are_correct(self):
+        from PIL import Image, ImageDraw
+        A = (59, 130, 246)
+        for state, diff in (("empty", 0.2), ("half", 0.5), ("full", 1.0)):
+            im = Image.new("RGB", (14, 14), (14, 17, 22))
+            d = ImageDraw.Draw(im)
+            box = [1, 1, 13, 13]
+            if state == "full":
+                d.ellipse(box, fill=A)
+            elif state == "half":
+                d.ellipse(box, outline=A, width=1)
+                d.pieslice(box, start=90, end=270, fill=A)
+            else:
+                d.ellipse(box, outline=A, width=1)
+            px = im.load()
+            centre = px[7, 7]
+            left = px[4, 7]
+            if state == "full":
+                self.assertEqual(centre, A)
+            elif state == "half":
+                self.assertEqual(left, A)            # left half filled
+                self.assertNotEqual(px[10, 7], A)    # right half not
+            else:
+                self.assertNotEqual(centre, A)       # hollow

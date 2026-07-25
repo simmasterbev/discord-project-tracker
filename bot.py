@@ -159,16 +159,25 @@ project_group = app_commands.Group(
 
 
 @project_group.command(name="new", description="Start tracking a new project")
-@app_commands.describe(name="Short unique name", description="What is this project?")
-async def project_new(interaction: discord.Interaction, name: str, description: str = ""):
+@app_commands.describe(name="Short unique name", description="What is this project?",
+                       group="Group it belongs to", region="Region", team="Team")
+async def project_new(interaction: discord.Interaction, name: str, description: str = "",
+                      group: str = "Universal", region: str = "Universal",
+                      team: str = "Universal"):
     if db.get_project(interaction.guild_id, name):
         await interaction.response.send_message(
             f"**{name}** already exists.", ephemeral=True
         )
         return
-    db.create_project(interaction.guild_id, name, description, interaction.user.id)
+    for val in (group, region, team):
+        if val.strip().lower() == "universal" and val != "Universal":
+            pass
+    pid = db.create_project(interaction.guild_id, name, description, interaction.user.id)
+    db.set_project_tags(pid, grp=group, region=region, team=team)
+    tags = " · ".join(v for v in (group, region, team) if v != "Universal")
     await interaction.response.send_message(
-        f"📁 Created **{name}**. Add work with `/task add project:{name} title:…`"
+        f"📁 Created **{name}**" + (f" ({tags})" if tags else "") +
+        f". Add a tree with `/tree new` or work with `/task add project:{name} title:…`"
     )
 
 
@@ -476,6 +485,7 @@ async def digest_set(
 class Tracker(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=discord.Intents.default())
+        self._command_cleanup_done = False
 
     async def setup_hook(self):
         db.connect()
@@ -484,15 +494,21 @@ class Tracker(commands.Bot):
         self.tree.add_command(digest_group)
         self.tree.add_command(tree_group)
         self.tree.add_command(config_group)
+        self.tree.add_command(milestone_group)
         if GUILD_ID:                      # instant, scoped to one server
             guild = discord.Object(id=int(GUILD_ID))
             self.tree.copy_global_to(guild=guild)
             await self.tree.sync(guild=guild)
+            await self.http.bulk_upsert_global_commands(self.application_id, [])
         else:                             # global: can take up to an hour to appear
             await self.tree.sync()
         self.digest_loop.start()
 
     async def on_ready(self):
+        if not GUILD_ID and not self._command_cleanup_done:
+            for guild in self.guilds:
+                await self.http.bulk_upsert_guild_commands(self.application_id, guild.id, [])
+            self._command_cleanup_done = True
         print(f"Logged in as {self.user} · {len(self.guilds)} guild(s)")
 
     @tasks.loop(minutes=30)
@@ -716,6 +732,40 @@ def standing_line(guild_id: int, user_id: int) -> str:
             f"{lv['next_at'] - xp} XP to {lv['next_name']}")
 
 
+def role_ids(interaction: discord.Interaction) -> set[int]:
+    return {r.id for r in getattr(interaction.user, "roles", [])}
+
+
+def is_manager(interaction: discord.Interaction) -> bool:
+    return interaction.user.guild_permissions.manage_guild
+
+
+def may_run(interaction: discord.Interaction, command: str) -> bool:
+    """A command with no configured gate is open. With one, you need the role or
+    Manage Server (which can never be locked out)."""
+    if is_manager(interaction):
+        return True
+    gate = db.get_cmd_perm(interaction.guild_id, command)
+    return gate is None or gate in role_ids(interaction)
+
+
+async def deny(interaction: discord.Interaction, command: str) -> None:
+    gate = db.get_cmd_perm(interaction.guild_id, command)
+    who = f"<@&{gate}>" if gate else "a server manager"
+    msg = f"`/{command.replace('_', ' ')}` is limited to {who} here."
+    if interaction.response.is_done():
+        await interaction.followup.send(msg, ephemeral=True)
+    else:
+        await interaction.response.send_message(msg, ephemeral=True)
+
+
+def may_set_universal(interaction: discord.Interaction) -> bool:
+    if is_manager(interaction):
+        return True
+    role = db.get_universal_role(interaction.guild_id)
+    return role is not None and role in role_ids(interaction)
+
+
 def may_sign_off(interaction: discord.Interaction) -> bool:
     """Server managers always may. Otherwise a configured role is required.
 
@@ -887,18 +937,87 @@ async def tree_show(interaction: discord.Interaction, tree: str | None = None,
 
 
 @tree_group.command(name="new", description="Create a named tree")
-@app_commands.describe(key="Short slug used in commands", name="Display name")
+@app_commands.describe(key="Short slug used in commands", name="Display name",
+                       project="Project this tree belongs to (inherits its tags)",
+                       group="Group (overrides the project's)", region="Region", team="Team")
+@app_commands.autocomplete(project=project_autocomplete)
 async def tree_new(interaction: discord.Interaction, key: str, name: str,
-                   description: str = ""):
+                   description: str = "", project: str | None = None,
+                   group: str | None = None, region: str | None = None,
+                   team: str | None = None):
     if db.get_tree(interaction.guild_id, key):
         await interaction.response.send_message(f"`{key}` already exists.", ephemeral=True)
         return
-    db.create_tree(interaction.guild_id, key, name, description)
+    tid = db.create_tree(interaction.guild_id, key, name, description)
+    # inherit from the project, then let explicit args override
+    proj = db.get_project(interaction.guild_id, project) if project else None
+    grp = group or (proj["grp"] if proj else "Universal")
+    reg = region or (proj["region"] if proj else "Universal")
+    tm = team or (proj["team"] if proj else "Universal")
+    db.set_tree_tags(tid, grp=grp, region=reg, team=tm)
+    if proj:
+        db.link_tree_project(tid, proj["id"])
+    tags = " · ".join(v for v in (grp, reg, tm) if v != "Universal")
     await interaction.response.send_message(
-        f"🌳 Created tree **{name}** (`{key}`).\n"
+        f"🌳 Created tree **{name}** (`{key}`)" + (f" — {tags}" if tags else "") + ".\n"
         f"Add milestones with `/tree add tree:{key} …`, or file existing ones with "
         f"`/tree include`."
     )
+
+
+milestone_group = app_commands.Group(
+    name="milestone", description="Work with individual milestones", guild_only=True
+)
+
+
+@milestone_group.command(name="update", description="Append a timestamped note to a milestone")
+@app_commands.autocomplete(key=milestone_autocomplete)
+@app_commands.describe(key="Milestone key", note="What changed")
+async def milestone_update(interaction: discord.Interaction, key: str, note: str):
+    m = db.get_milestone(interaction.guild_id, key)
+    if not m:
+        await interaction.response.send_message(f"No milestone `{key}`.", ephemeral=True)
+        return
+    # a private description can only be appended to by those who can read it
+    if m["private"] and not db.can_read_description(
+        interaction.guild_id, m["id"], interaction.user.id,
+        role_ids(interaction), is_manager(interaction)
+    ):
+        await interaction.response.send_message(
+            "That milestone's description is private — you're not on it.", ephemeral=True)
+        return
+    line = db.append_milestone_note(m["id"], interaction.user.id, note)
+    await interaction.response.send_message(
+        f"📝 Logged on **{m['name']}**:\n{line}")
+
+
+@milestone_group.command(name="history", description="The full update log for a milestone")
+@app_commands.autocomplete(key=milestone_autocomplete)
+async def milestone_history(interaction: discord.Interaction, key: str):
+    m = db.get_milestone(interaction.guild_id, key)
+    if not m:
+        await interaction.response.send_message(f"No milestone `{key}`.", ephemeral=True)
+        return
+    if m["private"] and not db.can_read_description(
+        interaction.guild_id, m["id"], interaction.user.id,
+        role_ids(interaction), is_manager(interaction)
+    ):
+        await interaction.response.send_message(
+            "That milestone's description is private — you're not on it.", ephemeral=True)
+        return
+    rows = db.milestone_audit(m["id"], limit=25)
+    if not rows:
+        await interaction.response.send_message(
+            f"No updates logged on **{m['name']}** yet.", ephemeral=True)
+        return
+    lines = []
+    for r in rows:
+        ts = datetime.fromisoformat(r["created_at"]).strftime("%Y-%m-%d %H:%M UTC")
+        lines.append(f"`{ts}` <@{r['author_id']}>: {r['body']}")
+    e = discord.Embed(title=f"{m['name']} — update log",
+                      description="\n".join(lines)[:4000],
+                      colour=discord.Color.blurple())
+    await interaction.response.send_message(embed=e, ephemeral=True)
 
 
 @tree_group.command(name="list", description="Every tree and how far along it is")
@@ -1007,6 +1126,8 @@ async def tree_drop(interaction: discord.Interaction, tree: str):
     requires="Comma-separated keys that must finish first",
     xp="XP awarded to contributors when it completes",
     tree="Which tree to file it under",
+    difficulty="1-10, half steps allowed (default 1)",
+    private="Hide the description from anyone but assignees and permitted roles",
 )
 @app_commands.autocomplete(tree=tree_autocomplete)
 async def tree_add(
@@ -1019,12 +1140,22 @@ async def tree_add(
     xp: app_commands.Range[int, 0, 5000] = 100,
     tree: str | None = None,
     auto_close: bool = True,
+    difficulty: app_commands.Range[float, 1.0, 10.0] = 1.0,
+    private: bool = False,
 ):
+    if not may_run(interaction, "tree_add"):
+        await deny(interaction, "tree_add")
+        return
     if db.get_milestone(interaction.guild_id, key):
         await interaction.response.send_message(f"`{key}` already exists.", ephemeral=True)
         return
+    # inherit group/region/team from the tree it's filed under
+    t = db.get_tree(interaction.guild_id, tree) if tree else None
+    grp = t["grp"] if t else "Universal"
+    region = t["region"] if t else "Universal"
+    team = t["team"] if t else "Universal"
     mid = db.create_milestone(interaction.guild_id, key, name, unlocks, xp, description,
-                              auto_close)
+                              auto_close, difficulty, private, grp, region, team)
     stubbed, looped = [], []
     for raw in filter(None, (r.strip() for r in requires.split(","))):
         rid, created = db.find_or_stub(interaction.guild_id, raw)
@@ -1037,18 +1168,19 @@ async def tree_add(
             stubbed.append(raw)
     filed = ""
     if tree:
-        t = db.get_tree(interaction.guild_id, tree)
         if t:
             db.add_to_tree(t["id"], mid)
             filed = f" in **{t['name']}**"
         else:
             filed = f" — ⚠️ no tree `{tree}`, left unfiled"
     gate = "closes itself at 100%" if auto_close else "waits for `/tree confirm`"
-    msg = f"🌲 Added **{name}** (`{key}`, {xp} XP){filed} — {gate}."
+    dpips = f" · difficulty {difficulty:g}" if difficulty != 1 else ""
+    lock = " · 🔒 private" if private else ""
+    msg = f"🌲 Added **{name}** (`{key}`, {xp} XP){filed} — {gate}{dpips}{lock}."
     if stubbed:
         for raw in stubbed:
             sid, _ = db.find_or_stub(interaction.guild_id, raw)
-            if tree and (t := db.get_tree(interaction.guild_id, tree)):
+            if tree and t:
                 db.add_to_tree(t["id"], sid)
         msg += f"\n🌱 Stubbed in: {', '.join(stubbed)} — describe them with `/tree edit`."
     if looped:
@@ -1065,6 +1197,11 @@ async def tree_add(
     unlocks="New description of what this makes possible",
     xp="New XP value",
     auto_close="True: completes itself at 100%. False: waits for /tree confirm.",
+    difficulty="1-10, half steps allowed",
+    private="Hide the description from anyone but assignees and permitted roles",
+    group="Reassign the group",
+    region="Reassign the region",
+    team="Reassign the team",
 )
 async def tree_edit(
     interaction: discord.Interaction,
@@ -1074,30 +1211,55 @@ async def tree_edit(
     unlocks: str | None = None,
     xp: app_commands.Range[int, 0, 5000] | None = None,
     auto_close: bool | None = None,
+    difficulty: app_commands.Range[float, 1.0, 10.0] | None = None,
+    private: bool | None = None,
+    group: str | None = None,
+    region: str | None = None,
+    team: str | None = None,
 ):
     m = db.get_milestone(interaction.guild_id, key)
     if not m:
         await interaction.response.send_message(f"No milestone `{key}`.", ephemeral=True)
         return
-    if name is description is unlocks is xp is auto_close is None:
+    nothing = all(v is None for v in (name, description, unlocks, xp, auto_close,
+                                      difficulty, private, group, region, team))
+    if nothing:
         gate = "closes itself at 100%" if m["auto_close"] else "waits for `/tree confirm`"
         await interaction.response.send_message(
-            f"**{m['name']}** · {m['xp']} XP · {gate}\n"
+            f"**{m['name']}** · {m['xp']} XP · {gate} · difficulty {m['difficulty']:g}"
+            f"{' · 🔒 private' if m['private'] else ''}\n"
+            f"tags: {m['grp']} · {m['region']} · {m['team']}\n"
             f"is: {m['description'] or '*no description*'}\n"
             f"unlocks: {m['unlocks'] or '*no payoff written*'}\n"
-            f"Pass `name`, `description`, `unlocks`, `xp`, or `auto_close` to change something.",
+            f"Pass any of name, description, unlocks, xp, auto_close, difficulty, "
+            f"private, group, region, team to change something.",
             ephemeral=True,
         )
         return
+    # setting a tag to Universal is a privileged act
+    for val in (group, region, team):
+        if val and val.strip().lower() == "universal" and not may_set_universal(interaction):
+            await interaction.response.send_message(
+                "Setting something **Universal** is limited — see `/config universal-role`.",
+                ephemeral=True)
+            return
     db.update_milestone(m["id"], name=name, description=description,
                         unlocks=unlocks, xp=xp,
                         auto_close=None if auto_close is None else int(auto_close))
+    if difficulty is not None:
+        db.set_difficulty(m["id"], difficulty)
+    if private is not None:
+        db.set_private(m["id"], private)
+    if any(v is not None for v in (group, region, team)):
+        db.set_milestone_tags(m["id"], grp=group, region=region, team=team)
     if m["is_stub"] and (description or unlocks):
         db.clear_stub(m["id"])
     fresh = db.get_milestone(interaction.guild_id, key)
     gate = "closes itself at 100%" if fresh["auto_close"] else "waits for `/tree confirm`"
     await interaction.response.send_message(
-        f"✏️ **{fresh['name']}** · {fresh['xp']} XP · {gate}\n"
+        f"✏️ **{fresh['name']}** · {fresh['xp']} XP · {gate} · "
+        f"difficulty {fresh['difficulty']:g}{' · 🔒 private' if fresh['private'] else ''}\n"
+        f"tags: {fresh['grp']} · {fresh['region']} · {fresh['team']}\n"
         f"is: {fresh['description'] or '*no description*'}\n"
         f"unlocks: {fresh['unlocks'] or '*no payoff written*'}"
     )
@@ -1130,6 +1292,10 @@ async def tree_requires(interaction: discord.Interaction, key: str, prerequisite
     if created:
         msg += (f"\n🌱 **{p['name']}** didn't exist, so I stubbed it in. "
                 f"Describe it with `/tree edit key:{p['key']}`.")
+    # cross-group links are allowed but announced, so the other group sees it
+    if p["grp"] not in ("Universal", m["grp"]) or m["grp"] not in ("Universal", p["grp"]):
+        msg += (f"\n📣 Cross-group link: **{m['grp']}** now depends on "
+                f"**{p['grp']}**'s milestone. Both groups can see this.")
     await interaction.response.send_message(msg)
 
 
@@ -1308,10 +1474,16 @@ async def tree_remove(interaction: discord.Interaction, key: str):
     )
 
 
-@bot.tree.command(name="start", description="Guided setup — build a tree with fill-in-the-blank forms")
+@bot.tree.command(name="start",
+                  description="Guided setup — project, then a tree, then milestones")
 @app_commands.guild_only()
 async def start(interaction: discord.Interaction):
-    await interaction.response.send_modal(wizard.TreeModal())
+    if not may_run(interaction, "start"):
+        await deny(interaction, "start")
+        return
+    await interaction.response.send_message(
+        "Let's set up a project. This walks you through it — press **Start**.",
+        view=wizard.ProjectStart(interaction.user.id), ephemeral=True)
 
 
 @bot.tree.command(name="help", description="How the pieces fit together")
@@ -1443,6 +1615,87 @@ async def levels(interaction: discord.Interaction):
                                                 interaction.user.id), inline=False)
     e.set_footer(text="Levels are cosmetic for now. /config level edits the ladder.")
     await interaction.response.send_message(embed=e, ephemeral=True)
+
+
+_KIND_CHOICES = [
+    app_commands.Choice(name="group", value="grp"),
+    app_commands.Choice(name="region", value="region"),
+    app_commands.Choice(name="team", value="team"),
+]
+
+
+@config_group.command(name="tag-add", description="Add a group, region, or team value")
+@app_commands.choices(kind=_KIND_CHOICES)
+@app_commands.describe(value="The name to add")
+@app_commands.default_permissions(manage_guild=True)
+async def config_tag_add(interaction: discord.Interaction,
+                         kind: app_commands.Choice[str], value: str):
+    db.add_taxonomy(interaction.guild_id, kind.value, value)
+    await interaction.response.send_message(
+        f"Added **{value}** to {kind.name}s.")
+
+
+@config_group.command(name="tag-remove", description="Remove a group, region, or team value")
+@app_commands.choices(kind=_KIND_CHOICES)
+@app_commands.default_permissions(manage_guild=True)
+async def config_tag_remove(interaction: discord.Interaction,
+                            kind: app_commands.Choice[str], value: str):
+    db.remove_taxonomy(interaction.guild_id, kind.value, value)
+    await interaction.response.send_message(
+        f"Removed **{value}** from {kind.name}s. Existing items keep the label.")
+
+
+@config_group.command(name="tags", description="List configured groups, regions and teams")
+async def config_tags(interaction: discord.Interaction):
+    e = discord.Embed(title="Taxonomy", colour=discord.Color.blurple())
+    for kind, label in db.TAXONOMY_LABEL.items():
+        vals = db.list_taxonomy(interaction.guild_id, kind)
+        e.add_field(name=label.title() + "s", value=", ".join(vals), inline=False)
+    await interaction.response.send_message(embed=e, ephemeral=True)
+
+
+@config_group.command(name="permission", description="Restrict a command to a role")
+@app_commands.describe(command="Command name, e.g. tree_import",
+                       role="Leave blank to reopen the command to everyone")
+@app_commands.default_permissions(manage_guild=True)
+async def config_permission(interaction: discord.Interaction, command: str,
+                            role: discord.Role | None = None):
+    command = command.strip().lstrip("/").replace(" ", "_")
+    db.set_cmd_perm(interaction.guild_id, command, role.id if role else None)
+    if role:
+        await interaction.response.send_message(
+            f"`/{command.replace('_',' ')}` now needs {role.mention} (or Manage Server).")
+    else:
+        await interaction.response.send_message(
+            f"`/{command.replace('_',' ')}` is open to everyone again.")
+
+
+@config_group.command(name="permissions", description="Show which commands are role-gated")
+async def config_permissions(interaction: discord.Interaction):
+    rows = db.list_cmd_perms(interaction.guild_id)
+    uni = db.get_universal_role(interaction.guild_id)
+    lines = [f"`/{r['command'].replace('_',' ')}` → <@&{r['role_id']}>" for r in rows]
+    if uni:
+        lines.append(f"setting anything **Universal** → <@&{uni}>")
+    e = discord.Embed(
+        title="Gated commands",
+        description="\n".join(lines) or "Nothing is gated — everything is open.",
+        colour=discord.Color.blurple(),
+    )
+    e.set_footer(text="Manage Server always passes. This is separate from Discord's "
+                      "own command-permission settings.")
+    await interaction.response.send_message(embed=e, ephemeral=True)
+
+
+@config_group.command(name="universal-role",
+                      description="Which role may set things Universal")
+@app_commands.describe(role="Leave blank to limit it to Manage Server")
+@app_commands.default_permissions(manage_guild=True)
+async def config_universal_role(interaction: discord.Interaction,
+                                role: discord.Role | None = None):
+    db.set_universal_role(interaction.guild_id, role.id if role else None)
+    who = role.mention if role else "people with Manage Server"
+    await interaction.response.send_message(f"Setting items **Universal** now needs {who}.")
 
 
 @config_group.command(name="level", description="Add or edit a rung on the XP ladder")

@@ -34,7 +34,7 @@ LABEL = {
     "complete": "COMPLETE",
 }
 
-NODE_W, NODE_H = 254, 156
+NODE_W, NODE_H = 254, 178
 DUMMY_H = 20                      # cross-axis slot reserved for a routed edge
 DUMMY_W = 26
 H_GAP, V_GAP = 108, 34
@@ -167,6 +167,29 @@ def _wrap(draw, text: str, font, max_w: int, max_lines: int) -> list[str]:
     if len(lines) == max_lines and draw.textlength(lines[-1], font=font) > max_w - 12:
         lines[-1] = lines[-1][:26] + "…"
     return lines
+
+
+def _draw_pips(target, difficulty, cx, top, accent):
+    """Ten difficulty pips, centred, half-steps supported. Pips are 12px so a
+    half-fill is unambiguous. Empty = ring, half = left semicircle + ring,
+    full = solid disc."""
+    from PIL import ImageDraw as _Dr
+    d = _Dr.Draw(target)
+    diff = max(1.0, min(10.0, float(difficulty)))
+    R, GAP, N = 6, 4, 10
+    strip = N * (2 * R) + (N - 1) * GAP
+    sx = cx - strip // 2
+    for i in range(N):
+        px = sx + i * (2 * R + GAP)
+        box = [px, top, px + 2 * R, top + 2 * R]
+        filled = diff - i
+        if filled >= 1:
+            d.ellipse(box, fill=accent)
+        elif filled >= 0.5:
+            d.ellipse(box, outline=accent, width=1)
+            d.pieslice(box, start=90, end=270, fill=accent)
+        else:
+            d.ellipse(box, outline=accent, width=1)
 
 
 def render_tree(
@@ -330,18 +353,24 @@ def render_tree(
             d.text((x1 - 12 - d.textlength(xp, font=F_TAG), y0 + 16), xp,
                    font=F_TAG, fill=t["text"])
 
+        # difficulty pips, centred along the top edge, 10 half-step positions
+        _draw_pips(img, n.get("difficulty") or 1, (x0 + x1) // 2, y0 + 6, t["accent"])
+
         # bottom block is anchored first so nodes stay aligned whatever the text
         people = n.get("people") or []
-        bar_y = y1 - (58 if people else 40)
+        bar_y = y1 - (74 if people else 56)
 
         cur_y = y0 + 36
         for line in _wrap(d, n["name"], F_NAME, inner, 2):
             d.text((x0 + 13, cur_y), line, font=F_NAME, fill=t["text"])
             cur_y += 18
 
-        desc = (n.get("description") or "").strip()
-        if stub and not desc:
-            desc = "Named as a prerequisite. Run /tree edit to describe it."
+        if n.get("private"):
+            desc = "🔒 restricted — details hidden"
+        else:
+            desc = (n.get("description") or "").strip()
+            if stub and not desc:
+                desc = "Named as a prerequisite. Run /tree edit to describe it."
         if desc:
             cur_y += 2
             for line in _wrap(d, desc, F_SMALL, inner, 2):
@@ -361,6 +390,14 @@ def render_tree(
         foot = f"{pct}%" + (f"  ·  {payoff}" if payoff else "")
         d.text((x0 + 13, bar_y + 13), _wrap(d, foot, F_SMALL, inner, 1)[0],
                font=F_SMALL, fill="#8b949e")
+
+        # tracking tags in the lower-left corner (only the non-Universal ones)
+        tags = [v for v in (n.get("grp"), n.get("region"), n.get("team"))
+                if v and v != "Universal"]
+        if tags:
+            label = " · ".join(tags)
+            d.text((x0 + 13, y1 - 17),
+                   _wrap(d, label, F_TAG, inner, 1)[0], font=F_TAG, fill="#6b7684")
 
         if people:
             px, py = x0 + 13, bar_y + 32
