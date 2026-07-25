@@ -494,7 +494,6 @@ class Tracker(commands.Bot):
         self.tree.add_command(digest_group)
         self.tree.add_command(tree_group)
         self.tree.add_command(config_group)
-        self.tree.add_command(milestone_group)
         if GUILD_ID:                      # instant, scoped to one server
             guild = discord.Object(id=int(GUILD_ID))
             self.tree.copy_global_to(guild=guild)
@@ -965,15 +964,10 @@ async def tree_new(interaction: discord.Interaction, key: str, name: str,
     )
 
 
-milestone_group = app_commands.Group(
-    name="milestone", description="Work with individual milestones", guild_only=True
-)
-
-
-@milestone_group.command(name="update", description="Append a timestamped note to a milestone")
+@tree_group.command(name="note", description="Append a timestamped note to a milestone")
 @app_commands.autocomplete(key=milestone_autocomplete)
 @app_commands.describe(key="Milestone key", note="What changed")
-async def milestone_update(interaction: discord.Interaction, key: str, note: str):
+async def tree_note(interaction: discord.Interaction, key: str, note: str):
     m = db.get_milestone(interaction.guild_id, key)
     if not m:
         await interaction.response.send_message(f"No milestone `{key}`.", ephemeral=True)
@@ -989,35 +983,6 @@ async def milestone_update(interaction: discord.Interaction, key: str, note: str
     line = db.append_milestone_note(m["id"], interaction.user.id, note)
     await interaction.response.send_message(
         f"📝 Logged on **{m['name']}**:\n{line}")
-
-
-@milestone_group.command(name="history", description="The full update log for a milestone")
-@app_commands.autocomplete(key=milestone_autocomplete)
-async def milestone_history(interaction: discord.Interaction, key: str):
-    m = db.get_milestone(interaction.guild_id, key)
-    if not m:
-        await interaction.response.send_message(f"No milestone `{key}`.", ephemeral=True)
-        return
-    if m["private"] and not db.can_read_description(
-        interaction.guild_id, m["id"], interaction.user.id,
-        role_ids(interaction), is_manager(interaction)
-    ):
-        await interaction.response.send_message(
-            "That milestone's description is private — you're not on it.", ephemeral=True)
-        return
-    rows = db.milestone_audit(m["id"], limit=25)
-    if not rows:
-        await interaction.response.send_message(
-            f"No updates logged on **{m['name']}** yet.", ephemeral=True)
-        return
-    lines = []
-    for r in rows:
-        ts = datetime.fromisoformat(r["created_at"]).strftime("%Y-%m-%d %H:%M UTC")
-        lines.append(f"`{ts}` <@{r['author_id']}>: {r['body']}")
-    e = discord.Embed(title=f"{m['name']} — update log",
-                      description="\n".join(lines)[:4000],
-                      colour=discord.Color.blurple())
-    await interaction.response.send_message(embed=e, ephemeral=True)
 
 
 @tree_group.command(name="list", description="Every tree and how far along it is")
@@ -1418,13 +1383,56 @@ async def tree_import(interaction: discord.Interaction, file: discord.Attachment
     )
 
 
-@tree_group.command(name="history", description="Who closed what, and when")
-@app_commands.autocomplete(tree=tree_autocomplete)
-async def tree_history(interaction: discord.Interaction, tree: str | None = None):
+@tree_group.command(name="history",
+                    description="Closures across a tree, or one milestone's full timeline")
+@app_commands.autocomplete(tree=tree_autocomplete, key=milestone_autocomplete)
+@app_commands.describe(tree="Limit to one tree (whole-server if blank)",
+                       key="A milestone key — shows its closures and notes together")
+async def tree_history(interaction: discord.Interaction, tree: str | None = None,
+                       key: str | None = None):
+    # with a key, show that one milestone's full story: closure + note trail
+    if key:
+        m = db.get_milestone(interaction.guild_id, key)
+        if not m:
+            await interaction.response.send_message(f"No milestone `{key}`.", ephemeral=True)
+            return
+        if m["private"] and not db.can_read_description(
+            interaction.guild_id, m["id"], interaction.user.id,
+            role_ids(interaction), is_manager(interaction)
+        ):
+            await interaction.response.send_message(
+                "That milestone's log is private — you're not on it.", ephemeral=True)
+            return
+        events = []
+        if m["completed_at"]:
+            who = f"<@{m['completed_by']}>" if m["completed_by"] else "auto"
+            events.append((m["completed_at"], f"✅ **closed** by {who}"))
+        for r in db.milestone_audit(m["id"], limit=50):
+            events.append((r["created_at"], f"📝 <@{r['author_id']}>: {r['body']}"))
+        events.sort(key=lambda e: e[0])
+        if not events:
+            await interaction.response.send_message(
+                f"Nothing logged on **{m['name']}** yet. Add a note with "
+                f"`/tree note key:{key}`.", ephemeral=True)
+            return
+        lines = []
+        for ts, text in events:
+            stamp = datetime.fromisoformat(ts).strftime("%Y-%m-%d %H:%M UTC")
+            lines.append(f"`{stamp}` {text}")
+        e = discord.Embed(
+            title=f"{m['name']} — timeline",
+            description="\n".join(lines)[:4000],
+            colour=discord.Color.blurple(),
+        )
+        await interaction.response.send_message(embed=e, ephemeral=True)
+        return
+
+    # no key: the closure log for the tree (or the whole server)
     rows = db.closure_history(interaction.guild_id, tree)
     if not rows:
         await interaction.response.send_message(
-            "Nothing has been closed yet.", ephemeral=True
+            "Nothing has been closed yet. Pass a `key` to see one milestone's notes.",
+            ephemeral=True,
         )
         return
     lines = []
@@ -1443,7 +1451,7 @@ async def tree_history(interaction: discord.Interaction, tree: str | None = None
         description="\n".join(lines),
         colour=discord.Color.green(),
     )
-    e.set_footer(text=f"{len(rows)} milestone(s) closed")
+    e.set_footer(text=f"{len(rows)} milestone(s) closed · pass a key for one milestone's notes")
     await interaction.response.send_message(embed=e)
 
 
@@ -1696,6 +1704,55 @@ async def config_universal_role(interaction: discord.Interaction,
     db.set_universal_role(interaction.guild_id, role.id if role else None)
     who = role.mention if role else "people with Manage Server"
     await interaction.response.send_message(f"Setting items **Universal** now needs {who}.")
+
+
+@config_group.command(name="export", description="Download the current config for the panel")
+@app_commands.default_permissions(manage_guild=True)
+async def config_export(interaction: discord.Interaction):
+    if not may_run(interaction, "config_export"):
+        await deny(interaction, "config_export")
+        return
+    import io, json
+    doc = await asyncio.to_thread(db.export_config, interaction.guild_id)
+    # include the server's roles so the offline panel can show real names
+    doc["_roles"] = {str(r.id): r.name for r in interaction.guild.roles if not r.is_default()}
+    buf = io.BytesIO(json.dumps(doc, indent=2).encode())
+    await interaction.response.send_message(
+        "Here's the current config. Open it in `config_panel.html`, edit, and send "
+        "it back with `/config import`.",
+        file=discord.File(buf, filename="config.json"), ephemeral=True)
+
+
+@config_group.command(name="import", description="Apply a config file from the panel")
+@app_commands.describe(file="A config.json from the panel")
+@app_commands.default_permissions(manage_guild=True)
+async def config_import(interaction: discord.Interaction, file: discord.Attachment):
+    if not may_run(interaction, "config_import"):
+        await deny(interaction, "config_import")
+        return
+    if not file.filename.lower().endswith(".json"):
+        await interaction.response.send_message(
+            "That needs to be the `.json` file from `config_panel.html`.", ephemeral=True)
+        return
+    if file.size > 500_000:
+        await interaction.response.send_message("That file is too big.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    import json
+    try:
+        doc = json.loads((await file.read()).decode("utf-8"))
+    except Exception as err:
+        await interaction.followup.send(
+            f"Couldn't read that file: `{type(err).__name__}`.", ephemeral=True)
+        return
+    valid = {r.id for r in interaction.guild.roles}
+    rep = await asyncio.to_thread(db.diff_config, interaction.guild_id, doc, valid)
+    role_name = {str(r.id): r.name for r in interaction.guild.roles}
+    embed = wizard.config_diff_embed(rep, role_name)
+    await interaction.followup.send(
+        embed=embed,
+        view=wizard.ConfigImportConfirm(doc, valid, interaction.user.id),
+        ephemeral=True)
 
 
 @config_group.command(name="level", description="Add or edit a rung on the XP ladder")

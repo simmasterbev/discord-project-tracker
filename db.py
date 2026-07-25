@@ -1084,6 +1084,10 @@ def list_levels(guild_id: int) -> list[sqlite3.Row]:
 
 def set_level(guild_id: int, threshold: int, name: str, perk: str = "") -> None:
     ensure_default_levels(guild_id)
+    _set_level_raw(guild_id, threshold, name, perk)
+
+
+def _set_level_raw(guild_id: int, threshold: int, name: str, perk: str = "") -> None:
     _exec("INSERT INTO levels (guild_id, threshold, name, perk) VALUES (?, ?, ?, ?) "
           "ON CONFLICT(guild_id, threshold) DO UPDATE SET name = ?, perk = ?",
           (guild_id, threshold, name, perk, name, perk))
@@ -1361,3 +1365,159 @@ def milestones_in_scope(guild_id: int, grp: str = "Universal", region: str = "Un
         params.append(exclude_id)
     sql += " ORDER BY m.name COLLATE NOCASE"
     return _q(sql, tuple(params))
+
+
+# ==========================================================================
+# config export / import (the leadership control panel round-trip)
+# ==========================================================================
+# The panel is an offline HTML page: it can't see the server, so /config export
+# hands it the current config plus the role list (names <-> ids) it needs to
+# render real dropdowns. /config import takes an edited file back. Semantics are
+# REPLACE — the file is the source of truth — with every removal surfaced first.
+
+def export_config(guild_id: int) -> dict:
+    """Everything the panel edits, as plain JSON-able data. Role IDs are kept as
+    strings so a 64-bit snowflake survives a JSON round trip intact."""
+    perms = {r["command"]: str(r["role_id"]) for r in list_cmd_perms(guild_id)}
+    tax = {kind: [v for v in list_taxonomy(guild_id, kind) if v != "Universal"]
+           for kind in TAXONOMIES}
+    lv = [{"xp": r["threshold"], "name": r["name"], "perk": r["perk"]}
+          for r in list_levels(guild_id)]
+    uni = get_universal_role(guild_id)
+    sign = get_signoff_role(guild_id)
+    return {
+        "version": 1,
+        "permissions": perms,
+        "universal_role": str(uni) if uni else None,
+        "signoff_role": str(sign) if sign else None,
+        "taxonomy": tax,
+        "levels": lv,
+    }
+
+
+def diff_config(guild_id: int, doc: dict, valid_role_ids: set[int]) -> dict:
+    """What applying `doc` would change, without touching anything.
+
+    Returns adds/changes/removals per section, plus rules skipped because the
+    role no longer exists, plus a lockout check.
+    """
+    def rid(v):
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return None
+
+    report = {"perm_set": [], "perm_change": [], "perm_remove": [],
+              "skipped": [], "tax_add": [], "tax_remove": [],
+              "level_set": [], "level_remove": [],
+              "universal": None, "signoff": None, "lockout": False}
+
+    # --- permissions (replace) ---
+    current = {r["command"]: r["role_id"] for r in list_cmd_perms(guild_id)}
+    wanted_raw = doc.get("permissions", {}) or {}
+    wanted = {}
+    for cmd, role in wanted_raw.items():
+        r = rid(role)
+        if r is None or r not in valid_role_ids:
+            report["skipped"].append((f"permission:{cmd}", str(role)))
+            continue
+        wanted[cmd] = r
+    for cmd, r in wanted.items():
+        if cmd not in current:
+            report["perm_set"].append((cmd, r))
+        elif current[cmd] != r:
+            report["perm_change"].append((cmd, current[cmd], r))
+    for cmd, r in current.items():
+        if cmd not in wanted:
+            report["perm_remove"].append((cmd, r))
+
+    # --- universal / signoff roles ---
+    for key, getter in (("universal", get_universal_role), ("signoff", get_signoff_role)):
+        want = rid(doc.get(f"{key}_role"))
+        if want is not None and want not in valid_role_ids:
+            report["skipped"].append((f"{key}_role", str(doc.get(f'{key}_role'))))
+            want = None
+        cur = getter(guild_id)
+        if want != cur:
+            report[key] = (cur, want)
+
+    # --- taxonomy (replace per dimension) ---
+    for kind in TAXONOMIES:
+        cur = {v for v in list_taxonomy(guild_id, kind) if v != "Universal"}
+        want = {v.strip() for v in (doc.get("taxonomy", {}).get(kind, []) or []) if v.strip()}
+        for v in want - cur:
+            report["tax_add"].append((kind, v))
+        for v in cur - want:
+            report["tax_remove"].append((kind, v))
+
+    # --- levels (replace) ---
+    cur_levels = {r["threshold"]: (r["name"], r["perk"]) for r in list_levels(guild_id)}
+    want_levels = {}
+    for lv in doc.get("levels", []) or []:
+        try:
+            want_levels[int(lv["xp"])] = (lv.get("name", ""), lv.get("perk", ""))
+        except (KeyError, ValueError, TypeError):
+            report["skipped"].append(("level", str(lv)))
+    for xp, (nm, pk) in want_levels.items():
+        if xp not in cur_levels or cur_levels[xp] != (nm, pk):
+            report["level_set"].append((xp, nm))
+    for xp in cur_levels:
+        if xp not in want_levels:
+            report["level_remove"].append((xp, cur_levels[xp][0]))
+
+    # --- lockout guard: would config_import end up with a valid gate AND a
+    #     Manage-Server fallback? Manage Server always passes, so the only true
+    #     lockout is a broken role gate — which we skip anyway. Flag if the
+    #     import tries to gate config_import to a now-invalid role.
+    ci = wanted_raw.get("config_import")
+    if ci is not None and rid(ci) not in valid_role_ids:
+        report["lockout"] = True     # they tried to gate it to a dead role
+
+    return report
+
+
+def apply_config(guild_id: int, doc: dict, valid_role_ids: set[int]) -> None:
+    """Replace-apply. Assumes diff_config was shown; re-validates roles so a
+    stale preview can't sneak a broken gate through."""
+    def rid(v):
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return None
+
+    # permissions: set wanted, clear the rest
+    wanted = {}
+    for cmd, role in (doc.get("permissions", {}) or {}).items():
+        r = rid(role)
+        if r is not None and r in valid_role_ids:
+            wanted[cmd] = r
+    for r in list_cmd_perms(guild_id):
+        if r["command"] not in wanted:
+            set_cmd_perm(guild_id, r["command"], None)
+    for cmd, r in wanted.items():
+        set_cmd_perm(guild_id, cmd, r)
+
+    # universal / signoff
+    uni = rid(doc.get("universal_role"))
+    set_universal_role(guild_id, uni if uni in valid_role_ids else None)
+    sign = rid(doc.get("signoff_role"))
+    set_signoff_role(guild_id, sign if sign in valid_role_ids else None)
+
+    # taxonomy: replace each dimension's set
+    for kind in TAXONOMIES:
+        cur = {v for v in list_taxonomy(guild_id, kind) if v != "Universal"}
+        want = {v.strip() for v in (doc.get("taxonomy", {}).get(kind, []) or []) if v.strip()}
+        for v in cur - want:
+            remove_taxonomy(guild_id, kind, v)
+        for v in want - cur:
+            add_taxonomy(guild_id, kind, v)
+
+    # levels: replace the whole ladder. Delete raw (bypassing the default
+    # auto-seed) so the file is truly the source of truth.
+    _exec("DELETE FROM levels WHERE guild_id=?", (guild_id,))
+    for lv in doc.get("levels", []) or []:
+        try:
+            _set_level_raw(guild_id, int(lv["xp"]), lv.get("name", "Level"),
+                           lv.get("perk", ""))
+        except (KeyError, ValueError, TypeError):
+            continue

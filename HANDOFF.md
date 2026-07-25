@@ -34,11 +34,21 @@ Projects/trees/milestones carry **group·region·team**, each a value or
 within your group — cross-group links need the typed `/tree requires` and post a
 notice. Setting `Universal` is role-gated. Milestones have a **difficulty** 1–10
 (half-steps, pips on the box) and a **private** flag that renders the description
-as 🔒 and gates its text to assignees/roles/managers. `/milestone update` appends
-UTC audit lines. Any command can be role-gated via `/config permission`.
+as 🔒 and gates its text to assignees/roles/managers. `/tree note` appends
+UTC audit lines (`/tree history key:…` reads them, interleaved with the closure). Any command can be role-gated via `/config permission`.
 
 Privacy is **not compliance-grade** — plaintext in the DB, visible to Discord.
 Documented as such.
+
+## Config panel (leadership bulk-edit)
+
+`config_panel.html` is offline — it produces and consumes files, never touches
+the server. `/config export` dumps config + the role list so the panel's
+dropdowns show real names; `/config import` takes an edited JSON back. Import is
+**replace** (file = source of truth) with every removal previewed. Broken-role
+gates are skipped; `/config import`/`export` are gated with Manage Server never
+locked out. `db.export_config` / `diff_config` / `apply_config` are the core;
+`_set_level_raw` exists so a replace doesn't re-seed default levels.
 
 ## The core model — get this right first
 
@@ -150,7 +160,7 @@ Discord.
    Stage-2 guided wizard (modal→select→modal chains) has *only* been verified to
    construct, never clicked through in a live client. That's the biggest untested
    surface in the codebase.
-1. **Tests exist now** — `python -m unittest discover tests`, 59 of them. They
+1. **Tests exist now** — `python -m unittest discover tests`, 66 of them. They
    were mutation-checked: breaking the cycle guard, the even split, the
    double-mint guard, `auto_close`, weighted progress, the credit list, or the
    bulk-query map each makes them fail. Two mutations they do *not* catch are

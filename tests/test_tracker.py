@@ -551,3 +551,70 @@ class TestRenderingStage3(Base):
                 self.assertNotEqual(px[10, 7], A)    # right half not
             else:
                 self.assertNotEqual(centre, A)       # hollow
+
+
+class TestConfigRoundTrip(Base):
+    def _seed(self):
+        db.add_taxonomy(G, "grp", "Aviation")
+        db.add_taxonomy(G, "grp", "Forum")
+        db.set_cmd_perm(G, "tree_import", 111)
+        db.set_cmd_perm(G, "start", 222)
+        db.set_universal_role(G, 333)
+        db.set_signoff_role(G, 444)
+
+    def test_export_uses_string_role_ids(self):
+        self._seed()
+        exp = db.export_config(G)
+        self.assertIsInstance(exp["permissions"]["tree_import"], str)
+        self.assertEqual(exp["universal_role"], "333")
+
+    def test_export_then_import_is_a_noop(self):
+        self._seed()
+        exp = db.export_config(G)
+        valid = {111, 222, 333, 444}
+        rep = db.diff_config(G, exp, valid)
+        changed = sum(len(v) for v in rep.values() if isinstance(v, list))
+        self.assertEqual(changed, 0)
+        self.assertIsNone(rep["universal"])
+        self.assertIsNone(rep["signoff"])
+
+    def test_replace_removes_absent_permissions(self):
+        self._seed()
+        doc = {"permissions": {"tree_import": "111"}, "taxonomy": {},
+               "levels": [], "universal_role": "333", "signoff_role": "444"}
+        rep = db.diff_config(G, doc, {111, 333, 444})
+        self.assertIn(("start", 222), rep["perm_remove"])   # removal is reported
+        db.apply_config(G, doc, {111, 333, 444})
+        perms = {r["command"]: r["role_id"] for r in db.list_cmd_perms(G)}
+        self.assertIn("tree_import", perms)
+        self.assertNotIn("start", perms)          # dropped by replace
+
+    def test_broken_role_gate_is_skipped_not_applied(self):
+        doc = {"permissions": {"tree_import": "999"}, "taxonomy": {}, "levels": []}
+        rep = db.diff_config(G, doc, {111})       # 999 invalid
+        self.assertIn(("permission:tree_import", "999"), rep["skipped"])
+        self.assertEqual(rep["perm_set"], [])
+        db.apply_config(G, doc, {111})
+        self.assertIsNone(db.get_cmd_perm(G, "tree_import"))
+
+    def test_lockout_flag_when_config_import_gated_to_dead_role(self):
+        doc = {"permissions": {"config_import": "999"}, "taxonomy": {}, "levels": []}
+        rep = db.diff_config(G, doc, {111})
+        self.assertTrue(rep["lockout"])
+
+    def test_taxonomy_replace_adds_and_removes(self):
+        db.add_taxonomy(G, "grp", "Old")
+        doc = {"permissions": {}, "taxonomy": {"grp": ["New"]}, "levels": []}
+        rep = db.diff_config(G, doc, set())
+        self.assertIn(("grp", "New"), rep["tax_add"])
+        self.assertIn(("grp", "Old"), rep["tax_remove"])
+        db.apply_config(G, doc, set())
+        self.assertEqual(db.list_taxonomy(G, "grp"), ["Universal", "New"])
+
+    def test_levels_fully_replace_without_reseeding_defaults(self):
+        db.set_level(G, 5000, "Legacy")           # a level the file omits
+        doc = {"permissions": {}, "taxonomy": {},
+               "levels": [{"xp": 0, "name": "Start"}, {"xp": 999, "name": "End"}]}
+        db.apply_config(G, doc, set())
+        got = [(r["threshold"], r["name"]) for r in db.list_levels(G)]
+        self.assertEqual(got, [(0, "Start"), (999, "End")])   # Legacy + defaults gone

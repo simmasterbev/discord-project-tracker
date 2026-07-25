@@ -1,453 +1,298 @@
 # Discord Project Progress Tracker
 
-A self-hosted Discord bot for tracking projects and their tasks, with live
-progress bars, blockers, due dates, and an optional weekly digest. Storage is
-SQLite — one file, no database server.
+A self-hosted Discord bot that tracks a project as a **tech tree**: milestones
+with prerequisites, drawn as an image, where finishing one visibly unlocks the
+next. Built for volunteer and civic organisations where the point is to get
+people moving work forward, not just to log it.
+
+Python 3.12, discord.py, SQLite — one file, no database server, no web service,
+no privileged intents.
+
+---
+
+## Contents
+
+- [Setup](#setup)
+- [The idea in one minute](#the-idea-in-one-minute)
+- [Core concepts](#core-concepts) — projects, tasks, milestones, trees
+- [Command reference](#command-reference)
+- [How the pieces work](#how-the-pieces-work) — XP, sign-off, privacy, taxonomy, and the rest
+- [The offline tools](#the-offline-tools) — planner and config panel
+- [Running the tests](#running-the-tests)
+- [A caution worth keeping](#a-caution-worth-keeping)
+
+---
 
 ## Setup
 
-1. Create an application at <https://discord.com/developers/applications>,
-   add a **Bot**, and copy the token.
+1. Create an application at <https://discord.com/developers/applications>, add a
+   **Bot**, and copy the token.
 2. Under **OAuth2 → URL Generator**, tick `bot` and `applications.commands`,
    grant *Send Messages* and *Embed Links*, and invite it to your server.
 3. Install and run:
 
-```bash
-pip install -r requirements.txt
-export DISCORD_TOKEN="your-token"
-python bot.py
-```
+   ```bash
+   pip install -r requirements.txt
+   export DISCORD_TOKEN="your-token"
+   python bot.py
+   ```
 
-Slash commands sync globally on first start and can take up to an hour to
-appear. To see them instantly while developing, replace `await self.tree.sync()`
-in `setup_hook` with:
+Set a `GUILD_ID` environment variable while setting up, or slash commands sync
+globally and take up to an hour to appear. `DEPLOY.md` has the full walkthrough
+including the systemd unit, font requirement, and backup notes. No privileged
+intents are required.
 
-```python
-guild = discord.Object(id=YOUR_GUILD_ID)
-self.tree.copy_global_to(guild=guild)
-await self.tree.sync(guild=guild)
-```
+---
 
-No privileged intents are required.
+## The idea in one minute
 
-## Commands
+A **project** holds **tasks**. Finishing tasks fills a **milestone**. Milestones
+have **prerequisites**, so completing one unlocks the milestones that depended on
+it. That dependency graph is a **tree**, rendered as an image where locked nodes
+are grey, available ones lit, and finished ones green.
+
+Contributors earn **XP** when a milestone unlocks, which accrues toward **levels**.
+
+The fastest way in is `/start`, which walks you through building a project, a
+tree, and its first milestones with fill-in-the-blank forms. Everything below can
+also be done one command at a time.
+
+---
+
+## Core concepts
+
+**Project** — a container for work. Has an owner, a status, and group/region/team
+tags. Holds tasks.
+
+**Task** — one step inside a project. Has an assignee, a status
+(todo/doing/blocked/done), an optional due date, and a weight. Tasks have no
+prerequisites; they just move a milestone toward 100%.
+
+**Milestone** — a box on the tree. Has prerequisites, a payoff (what it unlocks),
+a difficulty, and optionally a privacy flag. Its percentage is the weighted
+completion of the projects linked to it. If something needs a prerequisite, it's
+a milestone, not a task.
+
+**Tree** — a named *view* over the shared milestone graph, not a separate graph.
+A milestone can appear in several trees at once, so a shared gate like "funding
+secured" shows on every board it blocks rather than being duplicated.
+
+---
+
+## Command reference
+
+There are a lot of commands because the bot does a lot; in daily use you touch
+about six. They're grouped by noun.
+
+### The daily handful
 
 | Command | What it does |
 |---|---|
-| `/project new name description` | Start tracking a project |
+| `/start` | Guided setup: project → tree → milestones |
+| `/next [tree]` | What's ready to work on right now |
+| `/tree show [tree] [orientation]` | Draw the tree as an image |
+| `/tree confirm key [credit]` | Sign off a milestone, award its XP |
+| `/me` | Your open tasks across every project (private) |
+| `/task done task_id` | Complete a task; the bar updates |
+
+### Projects
+
+| Command | What it does |
+|---|---|
+| `/project new name [description] [group] [region] [team]` | Start tracking a project |
 | `/project list [include_archived]` | Every project with a progress bar |
 | `/project view name` | Tasks, status breakdown, recent updates |
 | `/project log name note` | Post a narrative status update |
 | `/project archive` · `unarchive` · `delete` | Lifecycle (owner or Manage Server) |
-| `/task add project title [assignee] [due] [weight]` | Add work |
-| `/task done task_id` | Complete a task, bar updates |
-| `/task status task_id new_status` | todo / doing / blocked / done |
-| `/task assign task_id [member]` | Reassign or clear |
-| `/task list project [status] [assignee]` | Filtered view |
-| `/task delete task_id` | Remove a task |
-| `/me` | Your open tasks across all projects (private) |
-| `/start` | Guided form-based setup |
-| `/help` | Plain-language explainer |
-| `/digest set channel [weekday] [hour]` | Weekly summary + overdue list |
 
-### Tech tree
+### Tasks
 
 | Command | What it does |
 |---|---|
-| `/tree show [tree]` | Renders one tree — or everything, if you name none |
-| `/tree new key name description` | Create a named tree |
-| `/tree list` | Every tree with its progress |
-| `/tree include key tree` · `exclude` | File a milestone into / out of a tree |
-| `/tree drop tree` | Delete a view (milestones survive) |
-| `/tree add … difficulty private group region team` | Add a milestone with difficulty, privacy, and tags |
-| `/tree edit key [name] [description] [unlocks] [xp] [auto_close]` | Change a milestone after the fact |
-| `/tree confirm key [credit]` | Sign off a milestone; optionally name who splits the XP |
-| `/tree history [tree]` | Who closed what, and when |
+| `/task add project title [assignee] [due] [weight]` | Add work |
+| `/task done task_id` | Complete a task |
+| `/task status task_id new_status` | todo / doing / blocked / done |
+| `/task assign task_id [member]` | Reassign or clear |
+| `/task list project [status] [assignee]` | Filtered view |
+| `/task delete task_id` | Remove a task (confirms first) |
+
+### Trees and milestones
+
+| Command | What it does |
+|---|---|
+| `/tree new key name [project] [group] [region] [team]` | Create a named tree |
+| `/tree add key name … [difficulty] [private]` | Add a milestone |
+| `/tree edit key …` | Change any milestone field, including tags |
+| `/tree requires milestone prerequisite` | Add a dependency (announces cross-group links) |
+| `/tree link key project` | Attach a project's work to a milestone |
+| `/tree confirm` · `complete` | Sign off a milestone |
+| `/tree include` · `exclude` | Add or remove a milestone from a tree view |
+| `/tree remove` · `drop` | Delete a milestone / a tree (both confirm first) |
+| `/tree list` | Overview of all trees |
 | `/tree import file:` | Load a plan from an attached spreadsheet |
-| `/config signoff role:` | Which role may sign off milestones |
-| `/config layout orientation:` | Left-to-right or top-to-bottom, server-wide |
-| `/config tag-add / tag-remove / tags` | Manage group, region, and team values |
-| `/config permission / permissions` | Restrict a command to a role |
-| `/config universal-role` | Who may set things Universal |
-| `/milestone update key note` | Append a timestamped note to a milestone |
-| `/milestone history key` | The full update log |
-| `/tree show orientation:` | Pick the orientation for this image |
-| `/tree requires key prerequisite` | Gate one milestone behind another |
-| `/tree link key project` | Attach a project's tasks to a milestone |
-| `/tree complete key` | Close a milestone by hand |
-| `/tree remove key` | Delete a milestone |
-| `/next [tree]` | What's open now, and the cheapest path to the next unlock |
-| `/leaderboard` | XP standings |
+| `/tree note key note` | Append a timestamped note to a milestone |
+| `/tree history [tree] [key]` | Closures across a tree, or one milestone's full timeline |
 
-## Notes
+### Progress and recognition
 
-- **Weighted progress.** `weight` (1–20) lets a two-week task count more than a
-  ten-minute one, so the bar reflects effort rather than task count.
-- **Due dates** accept `YYYY-MM-DD`, `5d`, `2w`, `1m`, `today`, `tomorrow`.
-- **Scoping.** Everything keys on `guild_id`, so one instance can serve several
-  servers without projects leaking between them.
-- **Permissions.** Anyone can create projects and tasks; only the project owner
-  or someone with Manage Server can archive or delete.
-- **Backups.** The whole dataset is `tracker.db`. Copy that file.
-
-## The two ideas
-
-Everything rests on one distinction, and it's the only thing worth learning:
-
-- **Milestones** are the boxes on the tree. They have **prerequisites** (what must
-  finish first) and a **payoff** (what they unlock).
-- **Tasks** are the small steps inside one milestone. They have no prerequisites
-  of their own — they just tick a milestone toward 100%.
-
-If you find yourself wanting to give a *task* a prerequisite, that task is really
-a milestone. Promote it.
-
-## Easiest way in: `/start`
-
-`/start` opens a pop-up form. Name the tree, then press **Add milestone** up to
-four times. Each milestone is one screen with five labelled boxes:
-
-| Box | Example |
+| Command | What it does |
 |---|---|
-| Milestone name | Venue booked |
-| What is it? | Call three halls, compare quotes, sign, pay the deposit |
-| What does finishing it make possible? | the date becomes announceable |
-| Must come after… | Funding secured, Scope locked |
-| XP when it unlocks | 250 |
+| `/leaderboard` | XP earned, with each person's level |
+| `/levels` | The XP ladder and where you sit |
+| `/help` | Plain-language explainer |
 
-Four is the cap because a Discord form allows five inputs and because a first
-tree with more than four boxes is usually one nobody reads. Add more afterwards
-with `/tree add`.
+### Configuration (Manage Server)
 
-### Stubs
-
-Prerequisites are matched **by name**. Anything that doesn't exist yet is created
-as a **stub** — a placeholder node rendered in grey as **NEEDS DEFINING**.
-
-This is what makes top-down sketching possible. Start from the thing you actually
-want ("Promo campaign live"), name what it waits on, and the gates appear as
-placeholders. Fill them in on a later pass with `/tree edit` — supplying a
-description or a payoff clears the stub flag automatically. `/next` lists any
-still undefined.
-
-Stubs behave like ordinary milestones otherwise: they gate their dependents and
-can be completed. They just look unfinished, because they are.
-
-### Ways in that aren't Discord
-
-| Route | Who it's for |
+| Command | What it does |
 |---|---|
-| **`/tree import`** | Drag a `.csv` onto the Discord message box and attach it to the command. The bot shows a preview of exactly what it will create, change, or stub — nothing is written until you press **Apply**. |
-| **`planner.html`** | Open it in any browser — no install, no server, nothing sent anywhere. Fill in milestones, tick which ones come first, watch the tree assemble, download a spreadsheet. |
-| **A spreadsheet** | Columns: `tree, milestone, description, unlocks, requires, xp, auto_close`. One row per milestone, semicolons between multiple prerequisites. Edit in Excel or Google Sheets, export as CSV. |
-| **A YAML file** | Same structure, better for version control. See `example_tree.yaml`. |
+| `/config signoff [role]` | Who may sign off milestones |
+| `/config layout orientation` | Default tree orientation, server-wide |
+| `/config tag-add` · `tag-remove` · `tags` | Manage group / region / team values |
+| `/config permission` · `permissions` | Restrict a command to a role |
+| `/config universal-role [role]` | Who may set things Universal |
+| `/config level` · `unlevel` | Edit the XP ladder |
+| `/config export` · `import` | The leadership config panel round-trip |
+| `/digest set channel [weekday] [hour]` | Weekly summary and overdue list |
 
-The last two end at the same place, either through Discord with `/tree import`
-or from a shell:
+---
 
-```bash
-python seed.py your-plan.csv --guild YOUR_SERVER_ID
-```
+## How the pieces work
 
-`/tree import` needs no server access at all, which makes it the route to give
-anyone who isn't going to SSH anywhere.
+### XP and levels
 
-Re-running updates rather than duplicating, so the file stays the source of truth
-if you want it to. Prerequisites naming something the file doesn't define become
-stubs.
+XP is minted only when a **milestone** unlocks, never per task — per-task points
+teach people to fragment work. It's split **evenly** among contributors (names
+given at sign-off, then task-closers, then the signer), with any remainder going
+to the first names.
 
-### Milestones without tasks
+XP accrues toward levels (Newcomer, Regular, Contributor, Steward, Anchor by
+default). Crossing a threshold posts an announcement. Levels are **cosmetic for
+now** — the ladder, thresholds, and announcements all work, but nothing is
+granted yet. `db.LEVEL_HOOKS` is the extension point: register a callable there
+to make a level grant a Discord role, unlock a command, or anything else.
 
-A milestone with no linked project can't track itself, so it stays at 0% until
-someone runs `/tree confirm`. That's the normal case for a tree built through
-`/start` — the description carries the detail, and the node is a yes/no.
+### Auto-close vs sign-off
 
-### How XP is split
+Each milestone either closes itself at 100% (`auto_close`, the default) or waits
+for a person. A milestone set to wait sits at NEEDS SIGN-OFF with its downstream
+still locked and its XP unpaid until someone runs `/tree confirm`. Sign-off is
+restricted — see below — because a gate anyone can open isn't a gate.
 
-Always an **even split**, never weighted. In priority order:
+### Out-of-order completion
 
-1. Names given at close time — `/tree confirm key:x credit:"@ana @ben @cy"`.
-   Accepts mentions, IDs, or plain display names.
-2. Everyone who closed a task under the milestone.
-3. Whoever signed it off, if there's nobody else.
+A milestone whose own work finishes before its prerequisites do is allowed to
+complete, tagged **DONE EARLY**. Real work happens out of sequence, and refusing
+to record it would make the board less honest, not more.
 
-Remainders go to the first names, so 100 XP across three people is 34/33/33.
-
-`/help` prints the same explanation in-channel.
-
-## Filling it in
-
-Order matters, because each layer references the one before it:
-
-1. `/project new` — the container for real work
-2. `/task add` — the work itself, with weights
-3. `/tree new` — a named board
-4. `/tree add` — milestones, **prerequisites before dependents**
-5. `/tree link` — attach projects so the milestone tracks itself
-
-`/tree edit` fixes anything you got wrong later.
-
-### Bulk setup
-
-Standing up a fifteen-node tree by hand is about forty slash commands. Write it
-once instead:
-
-```bash
-python seed.py example_tree.yaml --guild YOUR_SERVER_ID
-```
-
-`example_tree.yaml` documents every available field. The loader upserts by key,
-so edit the file and re-run to push changes — nothing duplicates, nothing is
-deleted. Dependencies resolve in a second pass, so you can reference a milestone
-defined further down the file.
-
-Run it on the server with the bot stopped, or against a copy of `tracker.db` and
-copy it back.
-
-## What a node shows
-
-Each card carries: state tag, XP, milestone name, **description** (what it is),
-progress bar, **unlocks** (what it buys you), and **who's on it**.
-
-The people row answers a different question depending on state. On a live
-milestone it lists whoever holds *open* tasks — the useful mid-flight question is
-who to nudge. On a completed one it lists whoever actually closed the work, in
-contribution order, which is who earned the XP.
-
-Names are resolved through a REST fetch when the member isn't cached, so this
-works without the privileged members intent.
-
-## Who may sign off
-
-`/tree confirm` and `/tree complete` are restricted, because a sign-off gate that
-anyone can press is not a gate. By default only **Manage Server** qualifies.
-Widen it with:
-
-```
-/config signoff role:@Coordinators
-```
-
-Everything else — creating milestones, closing tasks, importing plans — stays
-open to everyone.
-
-## Deleting things
-
-`/project delete`, `/tree remove`, and `/tree drop` show what will be destroyed
-and wait for a confirmation press. `/tree remove` also names any milestones the
-deletion would unlock, since removing a gate silently opens whatever it held.
-
-## Cycles
-
-A dependency that would make the graph circular is refused at the point of
-creation, in every route: `/tree requires`, `/tree add`, the `/start` form, and
-the file loader. Without that check both milestones lock permanently and nothing
-in the interface explains why.
-
-## Closure record
-
-Every closed milestone keeps who signed it and when. It shows in three places:
-on the node itself (the footer switches from the payoff line to
-`closed by Ana · 23 Jul`), in `/tree history`, and in the credit ledger behind
-`/leaderboard`. Auto-closed milestones record `auto` as the signer, since no
-human pressed anything.
-
-## Schema changes
-
-New columns are applied on startup by `_migrate()` in `db.py`, which checks
-`PRAGMA table_info` and issues an `ALTER TABLE` only when the column is missing.
-Existing databases upgrade in place with no data loss — you'll see a
-`[db] migrated:` line in the journal the first time. Take a backup first anyway.
-
-## Group, region, team
+### Group, region, team
 
 Every project, tree, and milestone carries three independent labels — **group**,
-**region**, **team** — each either a named value or **Universal**. Milestones
-inherit all three from the tree they're filed under, and can be retagged later.
-The rendered box shows the non-Universal labels in its lower-left corner.
+**region**, **team** — each a named value or **Universal**. Milestones inherit
+them from their tree and can be retagged later. The rendered box shows the
+non-Universal ones in its lower-left corner.
 
-These drive dropdown visibility. In the guided flow and in scope-aware pickers, a
-milestone from another group is hidden — you can only link to your own group's
-milestones plus anything Universal. That stops cross-group edits by accident.
+These drive dropdown visibility: in the guided flow, you only see milestones from
+your own group plus anything Universal, so cross-group edits can't happen by
+accident. Cross-group *dependencies* remain possible via `/tree requires`, which
+posts a notice naming both groups. Setting something **Universal** is itself gated
+(`/config universal-role`), so it can't be used to quietly make something visible
+everywhere.
 
-Cross-group dependencies are still possible, deliberately: the typed
-`/tree requires` will link across groups and posts a notice naming both, so the
-other group sees it even though they didn't have to approve it. Milestone
-creation is already role-gated, so this is mistake-proofing, not access control.
-
-Setting something **Universal** is itself gated — `/config universal-role` names
-who may, defaulting to Manage Server — so Universal can't be used to quietly make
-something visible everywhere.
-
-## Difficulty
+### Difficulty
 
 Each milestone has a difficulty from 1 to 10, half-steps allowed, set at creation
-and editable after (default 1). It renders as ten pips along the top of the box —
-solid, half, or hollow. It's a label, not a mechanic: nothing keys off it yet,
-but it gives the board a sense of where the hard work sits.
+and editable after (default 1). It renders as pips along the top of the box. It's
+a label, not a mechanic — nothing keys off it yet.
 
-## Private descriptions
+### Private descriptions
 
-A milestone marked `private` hides its description. On the rendered image the box
-shows **🔒 restricted** instead of the text. The actual description — and its
-update log — is readable only by task assignees, a permitted role
-(`/config permission command:milestone_private role:…`), or a server manager.
+A milestone marked `private` renders as **🔒 restricted** on the image. The real
+description and its update log are readable only by task assignees, a permitted
+role, or a server manager.
 
 This hides descriptions from casual view in a shared channel. It is **not
-compliance-grade**: the text still lives in the bot's database in plain form, and
-Discord itself can see anything the bot sends. Don't store data you'd be liable
-for leaking; store the fact that something is sensitive and handle the detail
-elsewhere.
+compliance-grade**: the text lives in the database in plain form, and Discord
+itself sees anything the bot sends. Don't store data you'd be liable for leaking.
 
-## Milestone update log
+### The milestone update log
 
-`/milestone update` appends a timestamped, attributed line to a milestone's
-description rather than overwriting it:
+`/tree note` appends a timestamped, attributed line to a milestone rather than
+overwriting its description:
 
 > [2026-07-24 19:32 UTC] @Darius: Hall confirmed, deposit paid
 
-Timestamps are UTC — Discord can't tell the bot a user's timezone, and one shared
-clock beats several guessed ones. The full history lives in a separate audit
-table (`/milestone history`) and survives even when the description field fills
-and older lines scroll off.
+Timestamps are UTC — Discord can't tell the bot a user's zone. The full history
+lives in a separate audit table (`/tree history key:…`) and survives even when the
+description fills.
 
-## Role-gated commands
+### Role-gated commands
 
-Beyond Discord's own permissions, any command can be restricted to a role:
+Beyond Discord's own permissions, any command can be restricted:
 
 ```
 /config permission command:tree_import role:@Coordinators
 ```
 
 Manage Server always passes and can't be locked out. `/config permissions` lists
-what's gated. This is a bot-level layer on top of Discord's own command-permission
-settings — the two are separate systems.
+what's gated. This is a bot-level layer on top of Discord's own command settings —
+the two are separate systems.
 
-## Auto-close vs sign-off
+### Rendering
 
-Each milestone carries `auto_close`, defaulting to **true**.
+Trees render left-to-right by default, top-to-bottom on request. Orientation is a
+per-image option on `/tree show` and a server default via `/config layout`; every
+rendered tree also carries a 🧭 button to flip it in place. It matters more than
+it sounds — a six-step chain is 2156×299 wide versus 346×1249 tall.
 
-- **true** — the node flips to complete the moment its linked projects hit 100%.
-- **false** — the node enters **NEEDS SIGN-OFF** (purple) instead. Downstream
-  stays locked and **no XP is paid** until someone runs `/tree confirm`.
+Under the hood, `tree_state` reads the whole graph in four queries regardless of
+size, and rendering runs in a worker thread so a large tree doesn't stall the
+bot's heartbeat.
 
-The distinction matters because "every task I wrote down is done" and "this is
-genuinely achieved" are different claims, and they diverge exactly when someone
-under-scoped the list. Cheap, well-understood milestones should close themselves.
-The two or three that other people's plans hang on are worth a human saying yes.
+---
 
-When a sign-off milestone reaches 100%, the bot posts a purple notice once. If
-the work reopens, the notice resets and fires again when it returns. `/next`
-lists anything waiting.
+## The offline tools
 
-`/tree confirm` on a milestone below 100% works — sometimes scope legitimately
-changes — but it says the percentage out loud in the channel so the override is
-visible rather than quiet.
+Two HTML files run entirely in a browser — nothing is sent anywhere.
 
-## How the tech tree works
+**`planner.html`** — build a tree visually and export it as a CSV, then load it
+with `/tree import`. The route to give anyone who won't touch a command line.
 
-Milestones are nodes; `requires` edges gate them. A milestone **completes** when
-every project linked to it hits 100%, which means the tree updates itself off
-normal task activity — nobody has to maintain it separately.
+**`config_panel.html`** — leadership tool for setting permissions, taxonomy,
+sign-off, universal-role, and levels in bulk. Run `/config export` to download a
+file carrying the current settings *and your role list*, open it in the panel so
+its dropdowns show real role names, edit, and apply with `/config import`. To
+gate to a role that isn't in the export, add it in the panel's **Roles** section
+by name and ID (right-click the role in Discord → Copy ID); the bot matches by
+ID, so a role added without one is flagged and won't apply.
 
-State is derived, never stored:
+Import is **replace** — the file becomes the source of truth. The preview spells
+out every addition, change, and **removal** before anything is applied. A rule
+naming a role that no longer exists is skipped, never applied as a broken gate.
+Both `/config import` and `/config export` are role-gated, and Manage Server can
+never be locked out of them.
 
-- **locked** — at least one prerequisite is unfinished
-- **available** — all prerequisites done, no work started
-- **active** — prerequisites done, work underway
-- **complete** — all linked projects finished
+---
 
-When the last prerequisite lands, the bot posts an unlock announcement naming
-everyone whose tasks fed it and listing what just became possible.
+## Running the tests
 
-### Multiple trees
-
-Trees are **named views over one shared milestone graph**, not separate graphs. A
-milestone can belong to several trees at once, which is the point: if "funding
-secured" gates both your build-out and your event, it should appear in both
-boards rather than being duplicated and drifting out of sync.
-
-When a tree's member depends on a milestone filed elsewhere, that prerequisite
-still renders — tagged `FROM <tree>` with a thinner border — so a gate never
-disappears just because it belongs to another initiative. Progress counts and
-`/next` ignore those external nodes; they're context, not your scoreboard.
-
-Milestones in no tree are "unfiled" and appear only in `/tree show` with no
-argument. Existing installs upgrade cleanly: the new tables are additive, and
-milestones created before trees existed simply start out unfiled.
-
-### Out-of-order completion
-
-A milestone whose own work finishes before its prerequisites do is allowed to
-complete. This is deliberate: real work happens out of sequence, and refusing to
-record it would make the board less honest, not more. Those nodes render with a
-**DONE EARLY** tag so the state is legible rather than looking like a rendering
-bug.
-
-### Levels
-
-`db.py` carries a level ladder — thresholds, names, and a free-text `perk`
-describing what each is meant to grant. `/levels` shows it, `/config level`
-edits it, and `/leaderboard` and `/me` display standing.
-
-**It is scaffolding.** Nothing is granted yet; `perk` is descriptive. The
-extension point is `db.LEVEL_HOOKS`, a list of callables invoked as
-`hook(guild_id, user_id, old_level, new_level)` whenever someone crosses a
-threshold. Register from `bot.py` to grant Discord roles, unlock commands, or
-post to a channel. `db` deliberately knows nothing about Discord, and a hook
-that raises is swallowed so a broken reward can never lose someone's XP.
-
-Defaults: Newcomer 0, Regular 250, Contributor 750, Steward 1750, Anchor 3500.
-
-### On XP
-
-XP is minted **only when a milestone unlocks**, then split across contributors in
-proportion to the weight of tasks they closed. This is deliberate: per-task
-points reward creating and closing trivial tasks, which is the failure mode of
-most gamified trackers. Tying the mint to milestones means the only way to score
-is to move something that was actually gating the project.
-
-`/leaderboard` is optional social pressure. The unlock announcement is the part
-that does the real work — it converts "I finished a chore" into "I opened a door
-for everyone."
-
-## Performance notes
-
-Database calls and PNG rendering both run in worker threads via
-`asyncio.to_thread`, and `db` holds a lock around every statement. Rendering a
-30-node tree takes roughly a third of a second — long enough to stall the gateway
-heartbeat if it ran inline, which can drop the bot's connection.
-
-Orientation is chosen per image on the command itself:
-
-```
-/tree show tree:forum orientation:top-to-bottom
+```bash
+python -m unittest discover tests
 ```
 
-and the rendered image carries a 🧭 button that re-renders it the other way in
-place, so nobody has to retype anything. `/config layout` sets the server
-default for when the option is left blank. It matters more than it sounds: a six-step chain renders 2156×299
-left-to-right, a strip too wide to read on a phone, and 346×1249 top-to-bottom.
-Wide shallow trees want left-to-right; deep narrow ones want top-to-bottom.
+66 tests, standard library only. They cover state derivation, weighted progress,
+XP settling once, cycle refusal, stubs, tree views, migrations, levels, taxonomy
+scope-filtering, privacy gates, command permissions, the audit log, the config
+round-trip, and rendering in both orientations. They're mutation-checked: the
+suite has been verified to *fail* when each guarantee is deliberately broken.
 
-Layout is a layered DAG: longest-path depth, then four alternating barycenter
-sweeps, with dummy routing lanes reserved for edges spanning more than one
-column. Output is downscaled past 2600px on the long edge so a large tree always
-fits Discord's upload limit.
+---
 
-A caveat on the routing lanes: they are theoretically sound but **not
-empirically justified**. Measured against a build with lanes disabled — including
-a graph built specifically to force a long edge across a crowded column — stray
-edge pixels inside node bodies were identical (8–11 either way, all
-antialiasing). They are defensive, not a fix for a demonstrated defect. An
-earlier claim of a large improvement here was a measurement error: the figure
-counted a completed node's own green progress bar as edge pixels.
+## A caution worth keeping
 
-`tree_state` issues **four queries regardless of tree size** — one for
-milestones, one for dependencies, and two aggregates for progress and
-assignees. It was previously about two per milestone (44 for 20 nodes).
-
-## Extending
-
-`db.py` is a plain function-per-query module with no ORM, so adding a field is a
-schema line plus a query. Natural next steps: threads per project, a `/burndown`
-chart via matplotlib, GitHub issue sync, or reminder DMs for overdue tasks.
+This tool assumes the bottleneck is **visibility** — that people don't contribute
+because they can't see what needs doing. Sometimes that's true. Often the real
+constraint is capacity, authority, or willingness, and a clearer board doesn't
+touch any of those. If work stalls because one person is the only one who can do
+it, the tree will render that stall beautifully in grey and gold while nothing
+moves. Worth watching whether the board changes behaviour or just documents it
+more attractively.

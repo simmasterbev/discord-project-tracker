@@ -662,3 +662,96 @@ class ProjectStart(discord.ui.View):
     @discord.ui.button(label="Start", style=discord.ButtonStyle.primary, emoji="🚀")
     async def begin(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(ProjectModal(StartFlow(self.author_id)))
+
+
+# ==========================================================================
+# config import: preview embed + confirm view
+# ==========================================================================
+
+def config_diff_embed(rep: dict, role_name: dict) -> discord.Embed:
+    def rn(rid):
+        return role_name.get(str(rid), f"<@&{rid}>")
+
+    e = discord.Embed(
+        title="Config import preview",
+        description="**Replace** — the file becomes the source of truth. Check the "
+                    "removals, then apply.",
+        colour=discord.Color.orange(),
+    )
+    if rep["lockout"]:
+        e.colour = discord.Color.red()
+        e.add_field(
+            name="⚠️ Blocked",
+            value="This file would gate `/config import` to a role that doesn't "
+                  "exist. That rule is skipped, so Manage Server keeps access — "
+                  "but fix the file before relying on it.",
+            inline=False)
+
+    def block(title, items):
+        if items:
+            e.add_field(name=title, value="\n".join(items)[:1000], inline=False)
+
+    block("➕ New command gates",
+          [f"`/{c.replace('_',' ')}` → {rn(r)}" for c, r in rep["perm_set"]])
+    block("✏️ Changed gates",
+          [f"`/{c.replace('_',' ')}` : {rn(o)} → {rn(n)}" for c, o, n in rep["perm_change"]])
+    block("🗑️ Removed gates (will reopen to Manage Server)",
+          [f"`/{c.replace('_',' ')}` (was {rn(r)})" for c, r in rep["perm_remove"]])
+    if rep["universal"]:
+        o, n = rep["universal"]
+        e.add_field(name="Universal-role",
+                    value=f"{rn(o) if o else 'Manage Server'} → {rn(n) if n else 'Manage Server'}",
+                    inline=False)
+    if rep["signoff"]:
+        o, n = rep["signoff"]
+        e.add_field(name="Sign-off role",
+                    value=f"{rn(o) if o else 'Manage Server'} → {rn(n) if n else 'Manage Server'}",
+                    inline=False)
+    block("Groups/regions/teams added", [f"{k}: {v}" for k, v in rep["tax_add"]])
+    block("Groups/regions/teams removed", [f"{k}: {v}" for k, v in rep["tax_remove"]])
+    block("Levels set", [f"{xp} XP — {nm}" for xp, nm in rep["level_set"]])
+    block("Levels removed", [f"{xp} XP — {nm}" for xp, nm in rep["level_remove"]])
+    if rep["skipped"]:
+        block("⏭️ Skipped (role no longer exists)",
+              [f"{what}: {val}" for what, val in rep["skipped"]])
+
+    if not any(rep[k] for k in ("perm_set", "perm_change", "perm_remove", "tax_add",
+                                "tax_remove", "level_set", "level_remove")) \
+            and not rep["universal"] and not rep["signoff"]:
+        e.description = "Nothing would change — the file matches the current config."
+    return e
+
+
+class ConfigImportConfirm(discord.ui.View):
+    def __init__(self, doc: dict, valid_role_ids: set, author_id: int):
+        super().__init__(timeout=300)
+        self.doc = doc
+        self.valid = valid_role_ids
+        self.author_id = author_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "Only whoever ran the import can apply it.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Apply", style=discord.ButtonStyle.danger, emoji="✅")
+    async def apply(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for c in self.children:
+            c.disabled = True
+        await interaction.response.edit_message(view=self)
+        # re-validate roles now, in case they changed since the preview
+        fresh_valid = {r.id for r in interaction.guild.roles}
+        import asyncio as _aio
+        await _aio.to_thread(db.apply_config, interaction.guild_id, self.doc, fresh_valid)
+        await interaction.followup.send("✅ Config applied.", ephemeral=True)
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for c in self.children:
+            c.disabled = True
+        await interaction.response.edit_message(
+            content="Import cancelled — nothing changed.", embed=None, view=self)
+        self.stop()
