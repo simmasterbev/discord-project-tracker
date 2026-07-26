@@ -288,7 +288,19 @@ python -m unittest discover tests
 XP settling once, cycle refusal, stubs, tree views, migrations, levels, taxonomy
 scope-filtering, privacy gates, command permissions, the audit log, the config
 round-trip, and rendering in both orientations. They're mutation-checked: the
-suite has been verified to *fail* when each guarantee is deliberately broken.
+ suite has been verified to *fail* when each guarantee is deliberately broken.
+
+### Live Discord channel check
+
+To verify the bot can actually reach a test channel, run:
+
+```bash
+python discord_channel_smoke_test.py
+```
+
+Enter the bot token and the channel ID. The script sends one labelled test
+message and edits it once. It does not create projects, tasks, trees, or
+database records.
 
 ---
 
