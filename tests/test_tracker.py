@@ -338,6 +338,33 @@ class TestImport(Base):
         self.assertEqual(m["grp"], "Universal")
         self.assertEqual(m["difficulty"], 1.0)
 
+    def test_json_plan_creates_project_tasks_tags_and_milestone_link(self):
+        text = '''{
+          "projects": [{
+            "name": "Venue work", "description": "Book a hall", "grp": "Events",
+            "region": "North", "team": "Ops",
+            "tasks": [{"title": "Get quotes", "weight": 3, "due": "2026-08-01", "assignee": 42}]
+          }],
+          "trees": [{
+            "key": "launch", "name": "Launch", "grp": "Events", "region": "North", "team": "Ops",
+            "milestones": [{"key": "venue", "name": "Venue booked", "projects": ["Venue work"]}]
+          }]
+        }'''
+        doc = seed.parse(text, "launch.json")
+        pv = seed.preview(doc, G)
+        self.assertEqual(pv["new_projects"], ["Venue work"])
+        self.assertEqual(pv["new_tasks"], ["Get quotes"])
+        seed.apply_doc(doc, G, 0)
+        project = db.get_project(G, "Venue work")
+        task = db.list_tasks(project["id"])[0]
+        milestone = db.get_milestone(G, "venue")
+        self.assertEqual((project["grp"], project["region"], project["team"]),
+                         ("Events", "North", "Ops"))
+        self.assertEqual((task["title"], task["weight"], task["assignee_id"]),
+                         ("Get quotes", 3, 42))
+        self.assertEqual([row["id"] for row in db.milestone_projects(milestone["id"])],
+                         [project["id"]])
+
 
 class TestRendering(Base):
     def nodes(self):

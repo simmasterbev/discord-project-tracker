@@ -1482,13 +1482,13 @@ async def tree_complete(interaction: discord.Interaction, key: str, credit: str 
     await push_unlocks(interaction)
 
 
-@tree_group.command(name="import", description="Load a plan from an attached spreadsheet")
-@app_commands.describe(file="A .csv or .yaml plan — drag it straight onto the message box")
+@tree_group.command(name="import", description="Load a CSV, YAML, or JSON plan")
+@app_commands.describe(file="A .csv, .yaml, or .json plan — drag it straight onto the message box")
 @app_commands.default_permissions(manage_guild=True)
 async def tree_import(interaction: discord.Interaction, file: discord.Attachment):
-    if not file.filename.lower().endswith((".csv", ".tsv", ".yaml", ".yml")):
+    if not file.filename.lower().endswith((".csv", ".tsv", ".yaml", ".yml", ".json")):
         await interaction.response.send_message(
-            "That needs to be a `.csv` or `.yaml` file. Build one at `planner.html` "
+            "That needs to be a `.csv`, `.yaml`, or `.json` file. Build one at `planner.html` "
             "if you don't have one yet.", ephemeral=True,
         )
         return
@@ -1505,8 +1505,7 @@ async def tree_import(interaction: discord.Interaction, file: discord.Attachment
     except Exception as err:
         await interaction.followup.send(
             f"Couldn't read that file: `{type(err).__name__}`. "
-            f"If you exported from a spreadsheet, choose **CSV** rather than the "
-            f"native format.", ephemeral=True,
+            "Check that the plan file is valid JSON, YAML, or CSV.", ephemeral=True,
         )
         return
 
@@ -1886,6 +1885,77 @@ async def test_config(interaction: discord.Interaction, visual: bool = False):
     await interaction.followup.send(
         f"🧪 **Config export/import test**\n{result}\n\n"
         "The original server configuration was restored."
+    )
+
+
+@test_group.command(name="plan", description="Test JSON project-plan import")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.describe(visual="Post the import preview and generated tree in this channel")
+async def test_plan(interaction: discord.Interaction, visual: bool = False):
+    await interaction.response.defer(ephemeral=not visual)
+    guild_id = interaction.guild_id
+    suffix = secrets.token_hex(3)
+    project_id = tree_id = milestone_id = None
+    checks: list[str] = []
+    try:
+        import json
+        project_name = f"Plan project {suffix}"
+        tree_key = f"plan-{suffix}"
+        milestone_key = f"plan-node-{suffix}"
+        raw = json.dumps({"projects": [{
+            "name": project_name, "description": "temporary", "grp": "Universal",
+            "region": "Universal", "team": "Universal",
+            "tasks": [{"title": "Plan task", "weight": 3, "assignee": interaction.user.id}],
+        }], "trees": [{"key": tree_key, "name": "Temporary Plan Test", "milestones": [{
+            "key": milestone_key, "name": "Plan milestone", "projects": [project_name],
+        }]}]})
+        doc = seed.parse(raw, "plan.json")
+        preview = seed.preview(doc, guild_id)
+        if preview["new_projects"] != [project_name] or preview["new_tasks"] != ["Plan task"]:
+            raise AssertionError("JSON preview did not include the project and task")
+        checks.append("JSON parsing and import preview")
+        if visual:
+            await interaction.followup.send("🧪 **JSON plan import preview:**",
+                                            embed=wizard.preview_embed(preview, "plan.json"))
+
+        seed.apply_doc(doc, guild_id, interaction.user.id)
+        project = db.get_project(guild_id, project_name)
+        tree = db.get_tree(guild_id, tree_key)
+        milestone = db.get_milestone(guild_id, milestone_key)
+        project_id, tree_id, milestone_id = project["id"], tree["id"], milestone["id"]
+        task = db.list_tasks(project_id)[0]
+        linked = db.milestone_projects(milestone_id)
+        if task["assignee_id"] != interaction.user.id or task["weight"] != 3:
+            raise AssertionError("project task fields were not imported")
+        if [row["id"] for row in linked] != [project_id]:
+            raise AssertionError("milestone was not linked to its project")
+        checks.append("project, task, and milestone link")
+
+        nodes = db.tree_view(guild_id, tree_key)
+        image = await asyncio.to_thread(tree_render.render_tree, nodes,
+                                        db.tree_edges(guild_id, nodes), "Temporary Plan Test", "lr")
+        if image.getbuffer().nbytes < 100:
+            raise AssertionError("JSON plan tree image was empty")
+        checks.append("tree rendering after import")
+        if visual:
+            await interaction.followup.send("🖼️ **Imported JSON plan tree:**",
+                                            file=discord.File(image, filename="plan-test.png"))
+    except Exception as error:
+        checks.append(f"FAILED: {error}")
+    finally:
+        if tree_id is not None:
+            db.delete_tree(tree_id)
+        if milestone_id is not None:
+            db.delete_milestone(milestone_id)
+        if project_id is not None:
+            db.delete_project(project_id)
+    result = "\n".join(f"✅ {check}" if not check.startswith("FAILED:") else f"❌ {check}"
+                       for check in checks)
+    await interaction.followup.send(
+        f"🧪 **JSON project-plan test**\n{result}\n\n"
+        + ("Temporary data was removed; visual messages remain in this channel."
+           if visual else "Use `visual:True` to see the preview and generated tree."),
+        ephemeral=not visual,
     )
 
 
@@ -2506,9 +2576,9 @@ class ControlPanel(discord.ui.View):
         embed.add_field(
             name="Build or edit a tech tree",
             value="1. Open `planner.html`\n"
-                  "2. Add/edit milestones, then **Download spreadsheet**\n"
-                  "3. Run `/tree import` and attach that CSV file\n\n"
-                  "Importing the same plan again updates it instead of making duplicates.",
+                  "2. Add/edit milestones; optionally add projects and tasks\n"
+                  "3. Download the plan, then run `/tree import` and attach it\n\n"
+                  "Milestone-only plans are CSV; plans with projects are JSON. Re-importing updates instead of duplicating.",
             inline=False,
         )
         embed.add_field(

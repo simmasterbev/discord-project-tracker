@@ -92,7 +92,7 @@ about six. They're grouped by noun.
 | `/panel` | Button-and-form control panel for common actions |
 | `/config export` | Download server settings for the offline settings editor |
 | `/config import file` | Preview and apply an edited settings export |
-| `/tree import file` | Preview and apply a tree CSV from the offline planner |
+| `/tree import file` | Preview and apply a CSV, YAML, or JSON plan from the offline planner |
 | `/stuck [days] [export]` | Manager-only report of idle, stalled, and blocked work |
 | `/next [tree]` | What's ready to work on right now |
 | `/tree show [tree] [orientation]` | Draw the tree as an image |
@@ -100,6 +100,7 @@ about six. They're grouped by noun.
 | `/test smoke` | Run a temporary end-to-end check in the current channel |
 | `/test suite [visual]` | Run broader progress, history, XP, and rendering checks |
 | `/test config [visual]` | Test config export, preview, apply, edit, and restore |
+| `/test plan [visual]` | Test JSON project, task, milestone, and tree import |
 | `/me` | Your open tasks across every project (private) |
 | `/task done task_id` | Complete a task; the bar updates |
 
@@ -147,7 +148,7 @@ about six. They're grouped by noun.
 | `/tree include` · `exclude` | Add or remove a milestone from a tree view |
 | `/tree remove` · `drop` | Delete a milestone / a tree (both confirm first) |
 | `/tree list` | Overview of all trees |
-| `/tree import file:` | Load a plan from an attached spreadsheet |
+| `/tree import file:` | Load a CSV, YAML, or JSON plan from an attachment |
 | `/tree note key note` | Append a timestamped note to a milestone |
 | `/tree history [tree] [key]` | Closures across a tree, or one milestone's full timeline |
 
@@ -273,12 +274,13 @@ bot's heartbeat.
 
 Two HTML files run entirely in a browser — nothing is sent anywhere.
 
-**`planner.html`** — build a tree visually and export it as a CSV, then load it
-with `/tree import`. It can load a `config.json` from the config panel to tag
-milestones with your real groups/regions/teams as you build, so the two tools
-share one vocabulary. Milestones carry everything the bot supports — difficulty,
-privacy flag, group/region/team — not just name and dependencies. The pages link to each other via a nav bar; each still
-exports its own file (a tree CSV from the planner, config JSON from the panel).
+**`planner.html`** — build a tree visually, and optionally add projects and their
+tasks. Milestone-only plans export as CSV; adding a project switches the download
+to JSON, which carries project descriptions, tags, task weight/due date/assignee,
+and milestone→project links. Load either one with `/tree import`. An assignee is
+their Discord user ID (enable Developer Mode, right-click the person, **Copy User
+ID**) or leave it blank to assign them later in Discord. The planner can load a
+`config.json` from the config panel so its group/region/team menus match the server.
 
 **`config_panel.html`** — leadership tool for setting permissions, taxonomy,
 sign-off, universal-role, and levels in bulk. Run `/config export` to download a
@@ -325,7 +327,7 @@ For a real in-server workflow check, run `/test smoke` as a server manager.
 It creates temporary project, task, tree, dependency, XP, and image-rendering
 data, reports each result in the channel, and removes the temporary data.
 
-Broader checks are available as `/test suite` and `/test config`. Add
+Broader checks are available as `/test suite`, `/test config`, and `/test plan`. Add
 `visual:True` to either one to show each stage and its results in the channel.
 New features must extend one of these tests or add a focused `/test <feature>`
 command with the same visual option.

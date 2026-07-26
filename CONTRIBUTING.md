@@ -8,8 +8,8 @@
 | `db.py` | All SQL. No ORM — one function per query |
 | `tree_render.py` | Draws the tech tree PNG with Pillow |
 | `wizard.py` | The `/start` pop-up forms |
-| `seed.py` | Bulk load from YAML or CSV |
-| `planner.html` | Offline browser planner, exports CSV |
+| `seed.py` | Bulk load from YAML, JSON, or CSV |
+| `planner.html` | Offline browser planner, exports CSV or project-plan JSON |
 
 ## Rules that keep it working
 

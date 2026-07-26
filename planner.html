@@ -30,7 +30,7 @@
 
   label{display:block;font-family:var(--mono);font-size:10px;letter-spacing:.09em;
         text-transform:uppercase;color:var(--muted);margin:0 0 5px}
-  input[type=text],textarea,input[type=number]{
+  input[type=text],input[type=date],textarea,input[type=number],select{
     width:100%;background:var(--ground);border:1px solid var(--line);border-radius:7px;
     color:var(--ink);padding:8px 10px;font:inherit;font-size:14px}
   textarea{resize:vertical;min-height:52px}
@@ -44,6 +44,9 @@
 
   .field{margin-bottom:12px}
   .row2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
+  .section-title{font-family:var(--mono);font-size:11px;letter-spacing:.09em;
+                 text-transform:uppercase;color:var(--muted);margin:28px 0 8px}
 
   .card{background:var(--surface);border:1px solid var(--line);border-radius:11px;
         padding:15px;margin-bottom:14px}
@@ -88,8 +91,8 @@
 <nav class="topnav"><a href="planner.html" class="active">🌳 Tree planner</a><a href="config_panel.html">⚙️ Config panel</a></nav>
 <header>
   <h1>Tree planner</h1>
-  <p>Lay out your milestones here, then download a spreadsheet file and hand it to
-     <code>seed.py</code>. Nothing is sent anywhere — this page runs entirely in your browser.</p>
+  <p>Lay out milestones and, if needed, their projects and tasks. Download the plan,
+     then import it with <code>/tree import</code>. Nothing is sent anywhere — this page runs entirely in your browser.</p>
 </header>
 
 <div class="wrap">
@@ -120,6 +123,10 @@
     </div>
     <div id="editor"></div>
     <button onclick="addNode()">+ Add milestone</button>
+    <h2 class="section-title">Projects and tasks <span style="text-transform:none;letter-spacing:0">(optional)</span></h2>
+    <p class="hint" style="margin-top:0">Add projects when you want the bot to track the work inside a milestone. Project names must be unique.</p>
+    <div id="project-editor"></div>
+    <button onclick="addProject()">+ Add project</button>
   </div>
 
   <div class="pane">
@@ -128,10 +135,11 @@
       Preview</h4>
     <div class="board" id="board"></div>
     <div class="out">
-      <button class="primary" onclick="download()">Download spreadsheet</button>
-      <button onclick="copyCsv()">Copy instead</button>
+      <button class="primary" onclick="download()">Download plan</button>
+      <button onclick="copyPlan()">Copy instead</button>
       <p class="hint">Then run:<br>
-        <code>python seed.py your-file.csv --guild YOUR_SERVER_ID</code><br>
+        <code>/tree import</code> and attach the downloaded file.<br>
+        Plans with milestones only download as CSV. Add a project and it downloads as JSON.<br>
         Re-running is safe — it updates rather than duplicating, so you can edit
         the plan here and load it again.</p>
     </div>
@@ -145,6 +153,7 @@ let nodes = [
   {name:"Panel confirmed", desc:"Four candidates agree in writing",
    unlocks:"promotion can start", req:["Venue booked"], xp:250, auto:true}
 ];
+let projects = [];
 
 const esc = s => (s||"").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
@@ -220,6 +229,32 @@ function toggleReq(i,name){
   at < 0 ? r.push(name) : r.splice(at,1);
   render();
 }
+function addProject(){
+  projects.push({name:"", desc:"", grp:"Universal", region:"Universal", team:"Universal", tasks:[]});
+  render();
+  setTimeout(()=>document.querySelector(`#p${projects.length-1}-name`)?.focus(), 0);
+}
+function removeProject(i){
+  const gone = projects[i].name;
+  projects.splice(i,1);
+  nodes.forEach(n => n.projects = (n.projects||[]).filter(name => name !== gone));
+  render();
+}
+function setProject(i,key,value){
+  const old = projects[i][key];
+  projects[i][key] = value;
+  if (key === "name" && old !== value)
+    nodes.forEach(n => n.projects = (n.projects||[]).map(name => name === old ? value : name));
+  render();
+}
+function addTask(i){ projects[i].tasks.push({title:"", weight:1, due:"", assignee:""}); render(); }
+function removeTask(i,j){ projects[i].tasks.splice(j,1); render(); }
+function setTask(i,j,key,value){ projects[i].tasks[j][key] = value; render(); }
+function toggleProject(i,name){
+  const links = nodes[i].projects ||= [], at = links.indexOf(name);
+  at < 0 ? links.push(name) : links.splice(at,1);
+  render();
+}
 
 /* depth = longest path from a root, same rule the bot uses */
 function tiers(){
@@ -247,6 +282,10 @@ function render(){
       ? others.map(o=>`<button type="button" class="chip" aria-pressed="${n.req.includes(o)}"
            onclick="toggleReq(${i},'${esc(o).replace(/'/g,"\\'")}')">${esc(o)}</button>`).join("")
       : `<span class="empty">Add another milestone first</span>`;
+    const projectChips = projects.filter(p=>p.name.trim()).length
+      ? projects.filter(p=>p.name.trim()).map(p=>`<button type="button" class="chip" aria-pressed="${(n.projects||[]).includes(p.name)}"
+           onclick="toggleProject(${i},'${esc(p.name).replace(/'/g,"\\'")}')">${esc(p.name)}</button>`).join("")
+      : `<span class="empty">Add a project below first</span>`;
     return `<div class="card">
       <h3>Milestone ${i+1}<button class="ghost" onclick="removeNode(${i})">Remove</button></h3>
       <div class="field"><label for="n${i}-name">Name</label>
@@ -279,6 +318,7 @@ function render(){
             <label for="n${i}-p" style="text-transform:none;letter-spacing:0;font-family:var(--sans);
                    font-size:13px;margin:0">🔒 Hide description</label></div></div>
       </div>
+      <div class="field"><label>Projects this milestone tracks</label><div class="chips">${projectChips}</div></div>
       <div class="field" style="margin-top:2px">
         <label style="display:flex;gap:6px;align-items:center;cursor:pointer">
           <input type="checkbox" ${n.tagged?"checked":""}
@@ -295,6 +335,35 @@ function render(){
       </div>
       <div class="field"><label>Team</label>
         <select onchange="set(${i},'team',this.value)">${taxOptions('team',n.team||treeScope.team)}</select></div>` : ""}
+    </div>`;
+  }).join("");
+
+  document.getElementById("project-editor").innerHTML = projects.map((p,i)=>{
+    const tasks = p.tasks.map((task,j)=>`<div class="card" style="margin:8px 0 0;padding:11px">
+      <h3>Task ${j+1}<button class="ghost" onclick="removeTask(${i},${j})">Remove</button></h3>
+      <div class="field"><label>What needs doing?</label>
+        <input type="text" value="${esc(task.title)}" placeholder="Get three quotes"
+               oninput="setTask(${i},${j},'title',this.value)"></div>
+      <div class="row3">
+        <div class="field"><label>Weight</label><input type="number" min="1" max="20" value="${task.weight||1}"
+          oninput="setTask(${i},${j},'weight',this.value)"></div>
+        <div class="field"><label>Due date</label><input type="date" value="${esc(task.due)}"
+          oninput="setTask(${i},${j},'due',this.value)"></div>
+        <div class="field"><label>Assignee ID</label><input type="text" value="${esc(task.assignee)}" placeholder="optional"
+          oninput="setTask(${i},${j},'assignee',this.value)"></div>
+      </div></div>`).join("") || `<p class="hint">No tasks yet.</p>`;
+    return `<div class="card">
+      <h3>Project ${i+1}<button class="ghost" onclick="removeProject(${i})">Remove</button></h3>
+      <div class="field"><label>Project name</label><input type="text" id="p${i}-name" value="${esc(p.name)}"
+        placeholder="Venue work" oninput="setProject(${i},'name',this.value)"></div>
+      <div class="field"><label>What is this project for?</label><textarea placeholder="Book and prepare the venue"
+        oninput="setProject(${i},'desc',this.value)">${esc(p.desc)}</textarea></div>
+      <div class="row3">
+        <div class="field"><label>Group</label><select onchange="setProject(${i},'grp',this.value)">${taxOptions('grp',p.grp||'Universal')}</select></div>
+        <div class="field"><label>Region</label><select onchange="setProject(${i},'region',this.value)">${taxOptions('region',p.region||'Universal')}</select></div>
+        <div class="field"><label>Team</label><select onchange="setProject(${i},'team',this.value)">${taxOptions('team',p.team||'Universal')}</select></div>
+      </div>
+      <label>Tasks</label>${tasks}<button style="margin-top:8px" onclick="addTask(${i})">+ Add task</button>
     </div>`;
   }).join("");
 
@@ -335,20 +404,61 @@ function csv(){
   return rows.map(r => r.map(q).join(",")).join("\n");
 }
 
+function slug(text, fallback){
+  return (text.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"").slice(0,20) || fallback);
+}
+
+function jsonPlan(){
+  const tree = document.getElementById("treename").value.trim() || "Untitled tree";
+  const projectNames = new Set(projects.map(p=>p.name.trim()).filter(Boolean));
+  const used = new Set();
+  const milestones = nodes.filter(n=>n.name.trim()).map((n,i)=>{
+    let key = slug(n.name, `milestone-${i+1}`), suffix = 2;
+    while (used.has(key)) key = `${key.slice(0,17)}-${suffix++}`;
+    used.add(key);
+    return {
+      key, name:n.name.trim(), description:n.desc||"", unlocks:n.unlocks||"",
+      requires:n.req||[], xp:Number(n.xp)||100, auto_close:!!n.auto,
+      difficulty:Number(n.difficulty)||1, private:!!n.private,
+      grp:n.tagged ? (n.grp||treeScope.grp) : treeScope.grp,
+      region:n.tagged ? (n.region||treeScope.region) : treeScope.region,
+      team:n.tagged ? (n.team||treeScope.team) : treeScope.team,
+      projects:(n.projects||[]).filter(name=>projectNames.has(name)),
+    };
+  });
+  return {
+    projects: projects.filter(p=>p.name.trim()).map(p=>({
+      name:p.name.trim(), description:p.desc||"", grp:p.grp||"Universal",
+      region:p.region||"Universal", team:p.team||"Universal",
+      tasks:p.tasks.filter(t=>t.title.trim()).map(t=>({
+        title:t.title.trim(), weight:Number(t.weight)||1, due:t.due||"", assignee:t.assignee||"",
+      })),
+    })),
+    trees: [{key:slug(tree,"tree"), name:tree, grp:treeScope.grp, region:treeScope.region,
+             team:treeScope.team, milestones}],
+  };
+}
+
+function usesProjects(){ return projects.some(p=>p.name.trim()); }
+
 function download(){
   const name = (document.getElementById("treename").value.trim() || "tree")
                  .toLowerCase().replace(/[^a-z0-9]+/g,"-");
+  const isJson = usesProjects();
+  const data = isJson ? JSON.stringify(jsonPlan(), null, 2) : csv();
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([csv()], {type:"text/csv"}));
-  a.download = name + ".csv";
+  a.href = URL.createObjectURL(new Blob([data], {type:isJson?"application/json":"text/csv"}));
+  a.download = name + (isJson ? ".json" : ".csv");
   a.click();
   URL.revokeObjectURL(a.href);
 }
 
-function copyCsv(){
-  navigator.clipboard?.writeText(csv()).then(
-    () => alert("Copied. Paste it into a text file ending in .csv"),
-    () => prompt("Copy this:", csv())
+function copyPlan(){
+  const data = usesProjects() ? JSON.stringify(jsonPlan(), null, 2) : csv();
+  const extension = usesProjects() ? "json" : "csv";
+  navigator.clipboard?.writeText(data).then(
+    () => alert(`Copied. Paste it into a text file ending in .${extension}`),
+    () => prompt("Copy this:", data)
   );
 }
 

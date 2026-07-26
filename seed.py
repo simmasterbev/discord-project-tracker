@@ -1,10 +1,11 @@
-"""Bulk-load trees and milestones from a YAML file or a spreadsheet export.
+"""Bulk-load projects, trees, and milestones from YAML, JSON, or a spreadsheet export.
 
 Typing twenty slash commands to stand up a tree is miserable and error-prone.
 Write the structure once, run this, done.
 
     python seed.py my_tree.yaml --guild 123456789012345678
     python seed.py my_tree.csv  --guild 123456789012345678
+    python seed.py my_plan.json --guild 123456789012345678
 
 For the spreadsheet route, use these column headers:
 
@@ -27,6 +28,7 @@ from __future__ import annotations
 import argparse
 import csv
 import io
+import json
 import sys
 from pathlib import Path
 
@@ -106,8 +108,15 @@ def upsert_project(guild_id: int, spec: dict, owner: int) -> int:
     existing = db.get_project(guild_id, name)
     if existing:
         db.update_project(existing["id"], description=spec.get("description"))
+        if any(key in spec for key in ("grp", "region", "team")):
+            db.set_project_tags(existing["id"], grp=spec.get("grp"),
+                                region=spec.get("region"), team=spec.get("team"))
         return existing["id"]
-    return db.create_project(guild_id, name, spec.get("description", ""), owner)
+    pid = db.create_project(guild_id, name, spec.get("description", ""), owner)
+    if any(key in spec for key in ("grp", "region", "team")):
+        db.set_project_tags(pid, grp=spec.get("grp"), region=spec.get("region"),
+                            team=spec.get("team"))
+    return pid
 
 
 def upsert_tree(guild_id: int, spec: dict) -> int:
@@ -116,9 +125,16 @@ def upsert_tree(guild_id: int, spec: dict) -> int:
     if existing:
         db.update_tree(existing["id"], name=spec.get("name"),
                        description=spec.get("description"))
+        if any(key in spec for key in ("grp", "region", "team")):
+            db.set_tree_tags(existing["id"], grp=spec.get("grp"),
+                             region=spec.get("region"), team=spec.get("team"))
         return existing["id"]
-    return db.create_tree(guild_id, key, spec.get("name", key),
-                          spec.get("description", ""))
+    tid = db.create_tree(guild_id, key, spec.get("name", key),
+                         spec.get("description", ""))
+    if any(key in spec for key in ("grp", "region", "team")):
+        db.set_tree_tags(tid, grp=spec.get("grp"), region=spec.get("region"),
+                         team=spec.get("team"))
+    return tid
 
 
 def upsert_milestone(guild_id: int, spec: dict) -> int:
@@ -155,11 +171,15 @@ def parse(text: str, filename: str) -> dict:
     """Text in, plan structure out. Used by both the CLI and `/tree import`."""
     if filename.lower().endswith((".csv", ".tsv")):
         return csv_to_doc(text)
-    doc = yaml.safe_load(text) or {}
-    # YAML uses the friendly key `group`; the rest of the code uses `grp`
-    for spec in ([m for t in doc.get("trees", []) for m in t.get("milestones", [])]
-                 + doc.get("milestones", [])):
-        if "group" in spec and "grp" not in spec:
+    doc = json.loads(text) if filename.lower().endswith(".json") else yaml.safe_load(text) or {}
+    if not isinstance(doc, dict):
+        raise ValueError("A plan must be a JSON or YAML object.")
+    # JSON and YAML both accept the friendly key `group`.
+    specs = list(doc.get("projects", []) or []) + list(doc.get("trees", []) or [])
+    specs += [m for tree in doc.get("trees", []) or [] for m in tree.get("milestones", []) or []]
+    specs += list(doc.get("milestones", []) or [])
+    for spec in specs:
+        if isinstance(spec, dict) and "group" in spec and "grp" not in spec:
             spec["grp"] = spec.pop("group")
     return doc
 
@@ -174,6 +194,15 @@ def preview(doc: dict, guild_id: int) -> dict:
     for t in doc.get("trees", []):
         (known_trees if db.get_tree(guild_id, t["key"]) else new_trees).append(
             t.get("name", t["key"]))
+    new_projects, known_projects, new_tasks, known_tasks = [], [], [], []
+    for project in doc.get("projects", []) or []:
+        existing = db.get_project(guild_id, project["name"])
+        (known_projects if existing else new_projects).append(project["name"])
+        existing_titles = {task["title"] for task in db.list_tasks(existing["id"])} if existing else set()
+        for task in project.get("tasks", []) or []:
+            title = task if isinstance(task, str) else task.get("title", "")
+            if title:
+                (known_tasks if title in existing_titles else new_tasks).append(title)
     created, updated, stubs = [], [], set()
     for spec in specs:
         existing = db.get_milestone(guild_id, spec["key"])
@@ -185,8 +214,10 @@ def preview(doc: dict, guild_id: int) -> dict:
             if not any(m["key"] == low or req.strip().lower() in m["name"].lower()
                        for m in db.list_milestones(guild_id)):
                 stubs.add(req.strip())
-    return {"new_trees": new_trees, "known_trees": known_trees, "created": created,
-            "updated": updated, "stubs": sorted(stubs),
+    return {"new_trees": new_trees, "known_trees": known_trees,
+            "new_projects": new_projects, "known_projects": known_projects,
+            "new_tasks": new_tasks, "known_tasks": known_tasks,
+            "created": created, "updated": updated, "stubs": sorted(stubs),
             "problems": doc.get("problems", [])}
 
 
@@ -203,8 +234,12 @@ def apply_doc(doc: dict, guild_id: int, owner: int) -> list[str]:
             existing = [r for r in db.list_tasks(pid) if r["title"] == t["title"]]
             if existing:
                 continue
-            db.add_task(pid, t["title"], t.get("assignee"),
-                        t.get("due"), int(t.get("weight", 1)))
+            try:
+                assignee = int(t["assignee"]) if t.get("assignee") else None
+                weight = max(1, min(20, int(t.get("weight", 1))))
+            except (TypeError, ValueError):
+                assignee, weight = None, 1
+            db.add_task(pid, t["title"], assignee, t.get("due"), weight)
             log.append(f"  task   {t['title']}")
 
     for spec in doc.get("trees", []):
@@ -253,7 +288,7 @@ def load(path: Path, guild_id: int, owner: int, dry_run: bool = False) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("file", type=Path, help="a .yaml or .csv plan")
+    ap.add_argument("file", type=Path, help="a .yaml, .json, or .csv plan")
     ap.add_argument("--guild", type=int, required=True, help="Discord server ID")
     ap.add_argument("--owner", type=int, default=0,
                     help="Discord user ID recorded as project owner")

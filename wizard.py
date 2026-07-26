@@ -95,8 +95,11 @@ class ImportConfirm(discord.ui.View):
         log = seed.apply_doc(self.doc, interaction.guild_id, interaction.user.id)
         gates = sum(1 for line in log if line.strip().startswith("gate"))
         nodes = sum(1 for line in log if line.strip().startswith("node"))
+        projects = sum(1 for line in log if line.startswith("project"))
+        tasks = sum(1 for line in log if line.strip().startswith("task"))
         await interaction.followup.send(
-            f"📥 Loaded **{self.filename}** — {nodes} milestone(s), {gates} dependency link(s).\n"
+            f"📥 Loaded **{self.filename}** — {projects} project(s), {tasks} task(s), "
+            f"{nodes} milestone(s), {gates} dependency link(s).\n"
             f"`/tree show` to see it, `/next` for where to start."
         )
         self.stop()
@@ -121,6 +124,11 @@ def preview_embed(pv: dict, filename: str) -> discord.Embed:
         e.colour = discord.Color.red()
         e.add_field(name="⚠️ Problems", value="\n".join(pv["problems"][:5]), inline=False)
     for label, items, note in (
+        ("📁 New projects", pv["new_projects"], ""),
+        ("📁 Existing projects (will be updated)", pv["known_projects"],
+         "The description and tags are replaced; existing tasks are kept."),
+        ("➕ New tasks", pv["new_tasks"], ""),
+        ("📋 Existing tasks (will be kept)", pv["known_tasks"], ""),
         ("🌳 New trees", pv["new_trees"], ""),
         ("🌳 Existing trees (will be updated)", pv["known_trees"], ""),
         ("➕ New milestones", pv["created"], ""),
@@ -134,7 +142,8 @@ def preview_embed(pv: dict, filename: str) -> discord.Embed:
         body = ", ".join(items[:12]) + (f" +{len(items) - 12} more" if len(items) > 12 else "")
         e.add_field(name=f"{label} ({len(items)})",
                     value=body + (f"\n*{note}*" if note else ""), inline=False)
-    if not any((pv["new_trees"], pv["known_trees"], pv["created"], pv["updated"])):
+    if not any((pv["new_projects"], pv["known_projects"], pv["new_trees"],
+                pv["known_trees"], pv["created"], pv["updated"])):
         e.description = "Nothing usable found in that file. Check the header row."
         e.colour = discord.Color.red()
     return e
