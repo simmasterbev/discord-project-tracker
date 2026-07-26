@@ -19,6 +19,7 @@ import discord
 import db
 
 MAX_WIZARD_NODES = 4
+DGG_BLUE = discord.Color.from_rgb(16, 152, 247)
 
 
 def slugify(text: str, taken: set[str]) -> str:
@@ -118,7 +119,7 @@ def preview_embed(pv: dict, filename: str) -> discord.Embed:
     e = discord.Embed(
         title=f"Preview: {filename}",
         description="Nothing has been saved yet. Check this over, then press **Apply**.",
-        colour=discord.Color.blurple(),
+        colour=DGG_BLUE,
     )
     if pv["problems"]:
         e.colour = discord.Color.red()
@@ -362,7 +363,7 @@ class MilestoneBuilder(discord.ui.View):
             title=f"Building: {self.tree_name}",
             description="\n".join(f"✅ {l}" for l in self.flow.log)
                         or "Press **Add milestone** to describe the first one.",
-            colour=discord.Color.blurple())
+            colour=DGG_BLUE)
         e.set_footer(text=f"{scope} · {self.flow.count}/{MAX_WIZARD_NODES} milestones · "
                           f"more later with /tree add")
         return e

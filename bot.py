@@ -35,6 +35,7 @@ STATUS_EMOJI = {"todo": "⬜", "doing": "🔵", "blocked": "🔴", "done": "✅"
 STATE_EMOJI = {"locked": "🔒", "available": "🟡", "active": "🔵",
                "pending": "🟣", "complete": "✅"}
 BAR_LEN = 14
+DGG_BLUE = discord.Color.from_rgb(16, 152, 247)
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +91,7 @@ def task_line(t, show_project: bool = False) -> str:
 
 
 def project_embed(project, prog, tasks_, log) -> discord.Embed:
-    colour = discord.Color.green() if prog["pct"] == 100 else discord.Color.blurple()
+    colour = discord.Color.green() if prog["pct"] == 100 else DGG_BLUE
     if prog["blocked"]:
         colour = discord.Color.red()
     e = discord.Embed(
@@ -202,7 +203,7 @@ async def project_list(interaction: discord.Interaction, include_archived: bool 
             f"({prog['done']}/{prog['count']} tasks){blocked}"
         )
     e = discord.Embed(
-        title="Projects", description="\n\n".join(lines), colour=discord.Color.blurple()
+        title="Projects", description="\n\n".join(lines), colour=DGG_BLUE
     )
     await interaction.response.send_message(embed=e)
 
@@ -406,7 +407,7 @@ async def task_list(
     e = discord.Embed(
         title=f"{p['name']} — tasks",
         description="\n".join(task_line(t) for t in rows[:40]),
-        colour=discord.Color.blurple(),
+        colour=DGG_BLUE,
     )
     await interaction.response.send_message(embed=e)
 
@@ -648,7 +649,7 @@ class Tracker(commands.Bot):
         e = discord.Embed(
             title="Weekly project digest",
             description="\n".join(lines),
-            colour=discord.Color.blurple(),
+            colour=DGG_BLUE,
             timestamp=datetime.now(timezone.utc),
         )
         overdue = db.overdue_tasks(guild_id, date.today().isoformat())
@@ -705,7 +706,7 @@ async def me(interaction: discord.Interaction):
     e = discord.Embed(
         title="Your open tasks",
         description="\n".join(task_line(t, show_project=True) for t in rows[:40]),
-        colour=discord.Color.blurple(),
+        colour=DGG_BLUE,
     )
     e.add_field(name="Standing", value=standing_line(interaction.guild_id,
                                                      interaction.user.id), inline=False)
@@ -1124,7 +1125,7 @@ async def tree_list(interaction: discord.Interaction):
             "No trees yet. Start one with `/start`.", ephemeral=True
         )
         return
-    e = discord.Embed(title="Trees", colour=discord.Color.blurple())
+    e = discord.Embed(title="Trees", colour=DGG_BLUE)
     FIELD_CAP = 23                      # Discord rejects embeds past 25 fields
     overflow = rows[FIELD_CAP:]
     for r in rows[:FIELD_CAP]:
@@ -1558,7 +1559,7 @@ async def tree_history(interaction: discord.Interaction, tree: str | None = None
         e = discord.Embed(
             title=f"{m['name']} — timeline",
             description="\n".join(lines)[:4000],
-            colour=discord.Color.blurple(),
+            colour=DGG_BLUE,
         )
         await interaction.response.send_message(embed=e, ephemeral=True)
         return
@@ -1991,7 +1992,7 @@ async def help_cmd(interaction: discord.Interaction):
             "When every task under a milestone is done, the milestone unlocks "
             "whatever was waiting on it."
         ),
-        colour=discord.Color.blurple(),
+        colour=DGG_BLUE,
     )
     e.add_field(
         name="Easiest way in",
@@ -2191,7 +2192,7 @@ async def config_tag_remove(interaction: discord.Interaction,
 
 @config_group.command(name="tags", description="List configured groups, regions and teams")
 async def config_tags(interaction: discord.Interaction):
-    e = discord.Embed(title="Taxonomy", colour=discord.Color.blurple())
+    e = discord.Embed(title="Taxonomy", colour=DGG_BLUE)
     for kind, label in db.TAXONOMY_LABEL.items():
         vals = db.list_taxonomy(interaction.guild_id, kind)
         e.add_field(name=label.title() + "s", value=", ".join(vals), inline=False)
@@ -2290,7 +2291,7 @@ async def config_notifies(interaction: discord.Interaction, key: str):
         lines.append("Task assignees: " + ", ".join(f"<@{user_id}>" for user_id in assignees))
     embed = discord.Embed(title=f"Who hears about {milestone['name']}",
                           description="\n".join(lines) or "Nobody yet — add them with `/config notify`.",
-                          colour=discord.Color.blurple())
+                          colour=DGG_BLUE)
     embed.set_footer(text="Project and tree notification lists are inherited.")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -2321,7 +2322,7 @@ async def config_permissions(interaction: discord.Interaction):
     e = discord.Embed(
         title="Gated commands",
         description="\n".join(lines) or "Nothing is gated — everything is open.",
-        colour=discord.Color.blurple(),
+        colour=DGG_BLUE,
     )
     e.set_footer(text="Manage Server always passes. This is separate from Discord's "
                       "own command-permission settings.")
@@ -2503,7 +2504,7 @@ def panel_embed() -> discord.Embed:
             "Use the buttons below instead of remembering slash-command fields. "
             "Start with the guided setup if this is your first project."
         ),
-        colour=discord.Color.blurple(),
+        colour=DGG_BLUE,
     )
     embed.add_field(
         name="1. Set up your project",
@@ -2577,7 +2578,7 @@ class ControlPanel(discord.ui.View):
         embed = discord.Embed(
             title="Offline planner and settings editor",
             description="These two HTML files run only in your browser. They do not need hosting.",
-            colour=discord.Color.blurple(),
+            colour=DGG_BLUE,
         )
         embed.add_field(
             name="Build or edit a tech tree",

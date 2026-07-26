@@ -13,16 +13,16 @@ from typing import Iterable
 from PIL import Image, ImageDraw, ImageFont
 
 # --- palette ---------------------------------------------------------------
-BG = "#0b1220"
-GRID = "#111c2c"
+BG = "#0b0c0f"
+GRID = "#14171c"
 
 THEME = {
-    "locked":    {"fill": "#161f2d", "edge": "#334155", "text": "#b7c2d1", "accent": "#64748b"},
-    "available": {"fill": "#12302d", "edge": "#2dd4bf", "text": "#d9fffa", "accent": "#2dd4bf"},
-    "active":    {"fill": "#172554", "edge": "#60a5fa", "text": "#dbeafe", "accent": "#60a5fa"},
-    "pending":   {"fill": "#2b1c3c", "edge": "#c084fc", "text": "#f3e8ff", "accent": "#c084fc"},
-    "stub":      {"fill": "#1c2532", "edge": "#526276", "text": "#b7c2d1", "accent": "#8191a8"},
-    "complete":  {"fill": "#123126", "edge": "#34d399", "text": "#dcfce7", "accent": "#34d399"},
+    "locked":    {"fill": "#17191d", "edge": "#343941", "text": "#aeb6c2", "accent": "#596270"},
+    "available": {"fill": "#10283b", "edge": "#1098f7", "text": "#f4f9ff", "accent": "#1098f7"},
+    "active":    {"fill": "#112d45", "edge": "#49b7ff", "text": "#f4f9ff", "accent": "#49b7ff"},
+    "pending":   {"fill": "#281d38", "edge": "#b779e8", "text": "#f3e8ff", "accent": "#b779e8"},
+    "stub":      {"fill": "#191c21", "edge": "#424852", "text": "#aeb6c2", "accent": "#687383"},
+    "complete":  {"fill": "#12281e", "edge": "#31c77a", "text": "#e5fff0", "accent": "#31c77a"},
 }
 
 LABEL = {
@@ -247,14 +247,16 @@ def render_tree(
     for y in range(0, height, 48):
         d.line([(0, y), (width, y)], fill=GRID, width=1)
 
-    d.text((PAD, 26), title, font=F_TITLE, fill="#f1f5f9")
+    d.text((PAD, 24), title, font=F_TITLE, fill="#f5f7fa")
+    d.rounded_rectangle([PAD, 65, min(PAD + 120, width - PAD), 68], radius=2,
+                        fill="#1098f7")
     own = [n for n in nodes if not n.get("external_from")]
     done = sum(1 for n in own if n["state"] == "complete")
     summary = f"{done}/{len(own)} milestones unlocked"
     # Keep the status line below the title. On narrow mobile-sized trees the
     # right-aligned text otherwise overlaps long tree names.
-    d.text((width - PAD - d.textlength(summary, font=F_SMALL), 60), summary,
-           font=F_SMALL, fill="#8fa1b8")
+    d.text((width - PAD - d.textlength(summary, font=F_SMALL), 56), summary,
+           font=F_SMALL, fill="#8e99a8")
 
     def mid_y(k):
         _, y0, _, y1 = box(k)
@@ -282,7 +284,7 @@ def render_tree(
         if src not in depth or dst not in depth:
             continue
         lit = by_key[src]["state"] == "complete"
-        colour = "#22c55e" if lit else "#30363d"
+        colour = "#1098f7" if lit else "#30343a"
         w = 3 if lit else 2
 
         if tb:
@@ -325,9 +327,9 @@ def render_tree(
             t = THEME["stub"]
         inner = NODE_W - 32
 
-        d.rounded_rectangle([x0 + 3, y0 + 5, x1 + 3, y1 + 5], radius=16, fill="#070c14")
+        d.rounded_rectangle([x0 + 3, y0 + 5, x1 + 3, y1 + 5], radius=10, fill="#060709")
         border = 1 if ext else 2
-        d.rounded_rectangle([x0, y0, x1, y1], radius=16, fill=t["fill"],
+        d.rounded_rectangle([x0, y0, x1, y1], radius=10, fill=t["fill"],
                             outline=t["edge"], width=border)
         d.rounded_rectangle([x0, y0, x0 + 5, y1], radius=3, fill=t["accent"])
 
@@ -336,7 +338,7 @@ def render_tree(
                else LABEL["early"] if n.get("out_of_order")
                else LABEL[n["state"]])
         tw = d.textlength(tag, font=F_TAG)
-        d.rounded_rectangle([x0 + 16, y0 + 14, x0 + 30 + tw, y0 + 34], radius=8,
+        d.rounded_rectangle([x0 + 16, y0 + 14, x0 + 30 + tw, y0 + 34], radius=5,
                             fill="#30363d" if (ext or stub) else t["accent"])
         d.text((x0 + 23, y0 + 19), tag, font=F_TAG,
                fill=t["text"] if (ext or stub) else "#0e1116")

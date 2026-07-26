@@ -6,21 +6,22 @@
 <title>Tree planner</title>
 <style>
   :root{
-    --ground:#0e1116; --grid:#161b22; --surface:#131820; --line:#252c38;
-    --ink:#e6edf3; --muted:#8b949e;
-    --locked:#4b5563; --ready:#f0b429; --done:#22c55e; --signoff:#a855f7;
+    --ground:#0b0c0f; --grid:#121419; --surface:#15171b; --raised:#1a1d22;
+    --line:#2a2e35; --ink:#f4f6f8; --muted:#9299a3;
+    --locked:#4f5865; --ready:#1098f7; --done:#31c77a; --signoff:#b779e8;
     --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
     --sans:system-ui,-apple-system,"Segoe UI",sans-serif;
   }
   *{box-sizing:border-box}
   body{
-    margin:0;padding:0;background:var(--ground);color:var(--ink);font-family:var(--sans);
+    margin:0;padding:0;background:var(--ground);color:var(--ink);font-family:var(--sans);color-scheme:dark;
     background-image:linear-gradient(var(--grid) 1px,transparent 1px),
                      linear-gradient(90deg,var(--grid) 1px,transparent 1px);
     background-size:34px 34px;
   }
-  header{padding:28px 24px 18px;border-bottom:1px solid var(--line)}
-  h1{margin:0;font-size:22px;letter-spacing:-.01em}
+  header{padding:28px 24px 20px;border-bottom:1px solid var(--line);
+         background:linear-gradient(90deg,#0c1b29 0,var(--ground) 48%)}
+  h1{margin:0;font-size:26px;letter-spacing:-.025em}
   header p{margin:6px 0 0;color:var(--muted);font-size:14px;max-width:62ch}
   .wrap{display:grid;grid-template-columns:minmax(340px,440px) 1fr;gap:0;align-items:start}
   @media(max-width:900px){.wrap{grid-template-columns:1fr}}
@@ -31,12 +32,12 @@
   label{display:block;font-family:var(--mono);font-size:10px;letter-spacing:.09em;
         text-transform:uppercase;color:var(--muted);margin:0 0 5px}
   input[type=text],input[type=date],textarea,input[type=number],select{
-    width:100%;background:var(--ground);border:1px solid var(--line);border-radius:7px;
+    width:100%;background:#101216;border:1px solid var(--line);border-radius:5px;
     color:var(--ink);padding:8px 10px;font:inherit;font-size:14px}
   textarea{resize:vertical;min-height:52px}
   input:focus,textarea:focus{outline:2px solid var(--ready);outline-offset:1px;border-color:transparent}
   .topnav{display:flex;gap:2px;padding:0 24px;border-bottom:1px solid var(--line);
-          background:var(--surface)}
+          background:#101114}
   .topnav a{padding:11px 16px;color:var(--muted);text-decoration:none;font-size:13px;
             border-bottom:2px solid transparent;font-family:var(--sans)}
   .topnav a:hover{color:var(--ink)}
@@ -48,22 +49,22 @@
   .section-title{font-family:var(--mono);font-size:11px;letter-spacing:.09em;
                  text-transform:uppercase;color:var(--muted);margin:28px 0 8px}
 
-  .card{background:var(--surface);border:1px solid var(--line);border-radius:11px;
-        padding:15px;margin-bottom:14px}
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:7px;
+        padding:15px;margin-bottom:14px;box-shadow:0 10px 28px #0003}
   .card h3{margin:0 0 12px;font-size:13px;font-family:var(--mono);color:var(--muted);
            display:flex;justify-content:space-between;align-items:center;font-weight:500}
-  button{font:inherit;cursor:pointer;border-radius:7px;border:1px solid var(--line);
-         background:var(--surface);color:var(--ink);padding:8px 13px;font-size:14px}
-  button:hover{border-color:var(--muted)}
+  button{font:inherit;cursor:pointer;border-radius:5px;border:1px solid var(--line);
+         background:var(--raised);color:var(--ink);padding:8px 13px;font-size:14px}
+  button:hover{border-color:var(--ready);background:#1d2127}
   button:focus-visible{outline:2px solid var(--ready);outline-offset:2px}
-  .primary{background:var(--ready);color:#0e1116;border-color:var(--ready);font-weight:600}
+  .primary{background:var(--ready);color:white;border-color:var(--ready);font-weight:700}
   .ghost{background:none;border:none;color:var(--muted);padding:2px 6px;font-size:12px}
   .ghost:hover{color:var(--ink)}
 
   .chips{display:flex;flex-wrap:wrap;gap:6px}
   .chip{font-family:var(--mono);font-size:11px;padding:4px 9px;border-radius:20px;
         border:1px solid var(--line);background:var(--ground);color:var(--muted);cursor:pointer}
-  .chip[aria-pressed=true]{border-color:var(--ready);color:var(--ready);background:#2a2008}
+  .chip[aria-pressed=true]{border-color:var(--ready);color:#b9e3ff;background:#0d2940}
   .chips .empty{font-size:12px;color:var(--muted);font-style:italic}
 
   .toggle{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted)}
@@ -74,7 +75,7 @@
   .tier h4{font-family:var(--mono);font-size:10px;letter-spacing:.09em;text-transform:uppercase;
            color:var(--muted);margin:0 0 9px;font-weight:500}
   .node{background:var(--surface);border:1px solid var(--locked);border-left-width:3px;
-        border-radius:9px;padding:10px 12px;margin-bottom:10px;width:212px}
+        border-radius:6px;padding:10px 12px;margin-bottom:10px;width:212px;box-shadow:0 8px 20px #0003}
   .node.ready{border-color:var(--ready)}
   .node.sign{border-color:var(--signoff)}
   .node .tag{font-family:var(--mono);font-size:9px;letter-spacing:.08em;color:var(--muted)}
