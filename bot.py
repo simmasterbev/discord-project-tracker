@@ -1500,7 +1500,8 @@ async def tree_remove(interaction: discord.Interaction, key: str):
 
 @test_group.command(name="smoke", description="Run a temporary end-to-end tracker check")
 @app_commands.default_permissions(manage_guild=True)
-async def test_smoke(interaction: discord.Interaction):
+@app_commands.describe(visible="Post each test step and the tree image in this channel")
+async def test_smoke(interaction: discord.Interaction, visible: bool = False):
     """Exercise the core tracker flow without leaving test data behind."""
     if not may_run(interaction, "test_smoke"):
         await deny(interaction, "test_smoke")
@@ -1526,10 +1527,20 @@ async def test_smoke(interaction: discord.Interaction):
         if db.progress(project_id)["pct"] != 0:
             raise AssertionError("new project did not start at 0%")
         checks.append("project/task creation")
+        if visible:
+            await interaction.followup.send(
+                f"📁 Created **Smoke Test {suffix}**.\n"
+                f"➕ Added **Temporary test task** → *Smoke Test {suffix}*"
+            )
         before = {n["key"]: n for n in db.tree_view(guild_id, f"smoke-{suffix}")}
         if before[f"smoke-next-{suffix}"]["state"] != "locked":
             raise AssertionError("dependency did not lock the next milestone")
         checks.append("dependency locking")
+        if visible:
+            await interaction.followup.send(
+                f"🌳 Created **Temporary Smoke Test**.\n"
+                f"🔒 **Smoke unlock** is locked until **Smoke gate** is complete."
+            )
 
         db.set_task_status(task_id, "done")
         after = {n["key"]: n for n in db.tree_view(guild_id, f"smoke-{suffix}")}
@@ -1538,11 +1549,20 @@ async def test_smoke(interaction: discord.Interaction):
         if after[f"smoke-next-{suffix}"]["state"] != "available":
             raise AssertionError("completed milestone did not unlock the next one")
         checks.append("progress and unlock")
+        if visible:
+            await interaction.followup.send(
+                "✅ **Temporary test task** done — **Smoke gate** now 100%.\n"
+                "🔓 **Smoke unlock** is now available."
+            )
 
         awards = db.settle_milestone(guild_id, gate_id, 100)
         if awards.get(interaction.user.id) != 100:
             raise AssertionError("XP was not credited to the test user")
         checks.append("XP credit")
+        if visible:
+            await interaction.followup.send(
+                f"🎉 **Smoke gate** complete — **{awards[interaction.user.id]} XP earned**."
+            )
 
         nodes = db.tree_view(guild_id, f"smoke-{suffix}")
         edges = db.tree_edges(guild_id, nodes)
@@ -1552,6 +1572,10 @@ async def test_smoke(interaction: discord.Interaction):
         if image.getbuffer().nbytes < 100:
             raise AssertionError("tree image was empty")
         checks.append("PNG rendering")
+        if visible:
+            await interaction.followup.send(
+                "🖼️ **Tree image generated:**", file=discord.File(image, filename="smoke-tree.png")
+            )
     except Exception as error:
         checks.append(f"FAILED: {error}")
     finally:
@@ -1565,7 +1589,8 @@ async def test_smoke(interaction: discord.Interaction):
 
     result = "\n".join(f"✅ {check}" for check in checks)
     await interaction.followup.send(
-        f"🧪 **Tracker smoke test**\n{result}\n\nTemporary test data was removed."
+        f"🧪 **Tracker smoke test**\n{result}\n\n"
+        f"Temporary test data was removed; the messages remain in this channel."
     )
 
 
