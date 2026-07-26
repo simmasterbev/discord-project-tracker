@@ -8,6 +8,7 @@ import io
 import json
 import logging
 import os
+import re
 from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -131,8 +132,22 @@ def admin_state() -> dict:
                        "assignee_id": task["assignee_id"], "due_date": task["due_date"],
                        "weight": task["weight"]} for task in db.list_tasks(project["id"])],
         })
+    raw_milestones = db.list_milestones(gid)
+    keys = {milestone["key"]: milestone["id"] for milestone in raw_milestones}
+    prerequisites = {}
+    for source, destination in db.deps(gid):
+        if source in keys and destination in keys:
+            prerequisites.setdefault(keys[destination], []).append(keys[source])
+    trees = []
+    tree_membership = {}
+    for tree in db.list_trees(gid):
+        members = [keys[key] for key in db.tree_members(tree["id"]) if key in keys]
+        trees.append({"id": tree["id"], "key": tree["key"], "name": tree["name"],
+                      "description": tree["description"], "members": members})
+        for mid in members:
+            tree_membership.setdefault(mid, []).append(tree["id"])
     milestones = []
-    for milestone in db.list_milestones(gid):
+    for milestone in raw_milestones:
         milestones.append({
             "id": milestone["id"], "key": milestone["key"], "name": milestone["name"],
             "description": milestone["description"], "unlocks": milestone["unlocks"],
@@ -140,8 +155,13 @@ def admin_state() -> dict:
             "private": bool(milestone["private"]), "auto_close": bool(milestone["auto_close"]),
             "group": milestone["grp"], "region": milestone["region"], "team": milestone["team"],
             "projects": [project["name"] for project in db.milestone_projects(milestone["id"])],
+            "project_ids": [project["id"] for project in db.milestone_projects(milestone["id"])],
+            "prerequisite_ids": prerequisites.get(milestone["id"], []),
+            "tree_ids": tree_membership.get(milestone["id"], []),
         })
-    return {"projects": projects, "milestones": milestones}
+    settings = dict(db.get_settings(gid))
+    settings["stale_roles"] = db.stale_alert_settings(gid)["roles"]
+    return {"projects": projects, "milestones": milestones, "trees": trees, "settings": settings}
 
 
 def text(value: object, label: str, limit: int = 500) -> str:
@@ -168,6 +188,16 @@ def positive_int(value: object, label: str, maximum: int = 1000000) -> int:
     return number
 
 
+def bounded_int(value: object, label: str, minimum: int, maximum: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a whole number.") from exc
+    if not minimum <= number <= maximum:
+        raise ValueError(f"{label} must be between {minimum} and {maximum}.")
+    return number
+
+
 def difficulty(value: object) -> float:
     try:
         number = float(value)
@@ -181,6 +211,21 @@ def difficulty(value: object) -> float:
 def nullable_user_id(value: object) -> int | None:
     value = str(value or "").strip()
     return positive_int(value, "Assignee ID", 999999999999999999) if value else None
+
+
+def ids(value: object, label: str) -> list[int]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{label} must be a list.")
+    return [positive_int(item, label[:-1] or label, 999999999999999999) for item in value]
+
+
+def slug(value: object, label: str) -> str:
+    value = text(value, label, 64).lower()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", value):
+        raise ValueError(f"{label} can use lowercase letters, numbers, hyphens, and underscores only.")
+    return value
 
 
 def nullable_date(value: object) -> str | None:
@@ -231,16 +276,97 @@ def apply_admin_update(payload: dict) -> None:
                        positive_int(payload.get("weight"), "Weight", 100))
     elif kind == "milestone":
         milestone = owned(db.list_milestones(gid), payload.get("id"), "Milestone")
-        db.update_milestone(milestone["id"], name=text(payload.get("name"), "Milestone name"),
-                            description=optional_text(payload.get("description"), "Milestone description"),
-                            unlocks=optional_text(payload.get("unlocks"), "Unlock description"),
-                            xp=positive_int(payload.get("xp"), "XP", 100000),
-                            auto_close=bool(payload.get("auto_close")))
-        db.set_difficulty(milestone["id"], difficulty(payload.get("difficulty")))
-        db.set_private(milestone["id"], bool(payload.get("private")))
-        db.set_milestone_tags(milestone["id"], grp=text(payload.get("group", "Universal"), "Group", 80),
-                              region=text(payload.get("region", "Universal"), "Region", 80),
-                              team=text(payload.get("team", "Universal"), "Team", 80))
+        name = text(payload.get("name"), "Milestone name")
+        description = optional_text(payload.get("description"), "Milestone description")
+        unlocks = optional_text(payload.get("unlocks"), "Unlock description")
+        xp = positive_int(payload.get("xp"), "XP", 100000)
+        auto_close = bool(payload.get("auto_close"))
+        level = difficulty(payload.get("difficulty"))
+        private = bool(payload.get("private"))
+        group = text(payload.get("group", "Universal"), "Group", 80)
+        region = text(payload.get("region", "Universal"), "Region", 80)
+        team = text(payload.get("team", "Universal"), "Team", 80)
+        if any(key in payload for key in ("project_ids", "prerequisite_ids", "tree_ids")):
+            project_ids = ids(payload.get("project_ids"), "Project IDs")
+            prerequisite_ids = ids(payload.get("prerequisite_ids"), "Prerequisite IDs")
+            tree_ids = ids(payload.get("tree_ids"), "Tree IDs")
+            valid_projects = {project["id"] for project in db.list_projects(gid, include_archived=True)}
+            valid_milestones = {item["id"] for item in db.list_milestones(gid)}
+            valid_trees = {tree["id"] for tree in db.list_trees(gid)}
+            if not set(project_ids) <= valid_projects or not set(prerequisite_ids) <= valid_milestones or not set(tree_ids) <= valid_trees:
+                raise ValueError("Roadmap links must belong to this tracker.")
+            if not db.replace_milestone_wiring(milestone["id"], project_ids, prerequisite_ids, tree_ids):
+                raise ValueError("That prerequisite change would create a cycle.")
+        db.update_milestone(milestone["id"], name=name, description=description, unlocks=unlocks, xp=xp,
+                            auto_close=auto_close)
+        db.set_difficulty(milestone["id"], level)
+        db.set_private(milestone["id"], private)
+        db.set_milestone_tags(milestone["id"], grp=group, region=region, team=team)
+    elif kind == "create_project":
+        db.create_project(gid, text(payload.get("name"), "Project name"),
+                          optional_text(payload.get("description"), "Project description"),
+                          positive_int(payload.get("owner_id"), "Owner Discord ID", 999999999999999999),
+                          difficulty(payload.get("difficulty", 1)))
+    elif kind == "create_task":
+        project = owned(db.list_projects(gid, include_archived=True), payload.get("project_id"), "Project")
+        task_id = db.add_task(project["id"], text(payload.get("title"), "Task title"),
+                              nullable_user_id(payload.get("assignee_id")), nullable_date(payload.get("due_date")),
+                              positive_int(payload.get("weight", 1), "Weight", 100))
+        db.set_task_status(task_id, payload.get("status", "todo"))
+    elif kind == "create_milestone":
+        db.create_milestone(gid, slug(payload.get("key"), "Milestone key"),
+                            text(payload.get("name"), "Milestone name"),
+                            optional_text(payload.get("unlocks"), "Unlock description"),
+                            positive_int(payload.get("xp", 100), "XP", 100000),
+                            optional_text(payload.get("description"), "Milestone description"),
+                            bool(payload.get("auto_close", True)), difficulty(payload.get("difficulty", 1)),
+                            bool(payload.get("private", False)), text(payload.get("group", "Universal"), "Group", 80),
+                            text(payload.get("region", "Universal"), "Region", 80),
+                            text(payload.get("team", "Universal"), "Team", 80))
+    elif kind == "create_tree":
+        db.create_tree(gid, slug(payload.get("key"), "Tree key"), text(payload.get("name"), "Tree name"),
+                       optional_text(payload.get("description"), "Tree description"))
+    elif kind == "tree":
+        tree = owned(db.list_trees(gid), payload.get("id"), "Tree")
+        db.update_tree(tree["id"], name=text(payload.get("name"), "Tree name"),
+                       description=optional_text(payload.get("description"), "Tree description"))
+    elif kind == "delete":
+        if payload.get("confirm") != "DELETE":
+            raise ValueError("Type DELETE to confirm removal.")
+        target = payload.get("target")
+        if target == "project":
+            db.delete_project(owned(db.list_projects(gid, include_archived=True), payload.get("id"), "Project")["id"])
+        elif target == "task":
+            task = db.get_task(gid, positive_int(payload.get("id"), "Task ID", 999999999999999999))
+            if not task:
+                raise ValueError("Task was not found for this tracker.")
+            db.delete_task(task["id"])
+        elif target == "milestone":
+            db.delete_milestone(owned(db.list_milestones(gid), payload.get("id"), "Milestone")["id"])
+        elif target == "tree":
+            db.delete_tree(owned(db.list_trees(gid), payload.get("id"), "Tree")["id"])
+        else:
+            raise ValueError("Unknown removal type.")
+    elif kind == "settings":
+        settings = db.get_settings(gid)
+        layout = payload.get("layout", settings["layout"])
+        if layout not in ("lr", "tb"):
+            raise ValueError("Layout must be left-to-right or top-to-bottom.")
+        tree_key = str(payload.get("board_tree") or "").strip().lower() or None
+        if tree_key and not db.get_tree(gid, tree_key):
+            raise ValueError("Scheduled board tree was not found.")
+        db.update_settings(gid,
+            signoff_role=nullable_user_id(payload.get("signoff_role")), universal_role=nullable_user_id(payload.get("universal_role")),
+            layout=layout, digest_channel=nullable_user_id(payload.get("digest_channel")),
+            digest_weekday=bounded_int(payload.get("digest_weekday", 0), "Digest weekday", 0, 6),
+            digest_hour=bounded_int(payload.get("digest_hour", 9), "Digest hour", 0, 23),
+            board_channel=nullable_user_id(payload.get("board_channel")),
+            board_weekday=bounded_int(payload.get("board_weekday", 0), "Board weekday", 0, 6),
+            board_hour=bounded_int(payload.get("board_hour", 9), "Board hour", 0, 23), board_tree=tree_key,
+            stale_channel=nullable_user_id(payload.get("stale_channel")), stale_days=positive_int(payload.get("stale_days", 7), "Stale days", 90))
+        roles = ids(payload.get("stale_roles"), "Stale alert role IDs")
+        db.set_stale_alerts(gid, nullable_user_id(payload.get("stale_channel")),
+                            positive_int(payload.get("stale_days", 7), "Stale days", 90), roles)
     else:
         raise ValueError("Unknown edit type.")
     LOG.info("Dashboard admin updated %s id=%s", kind, payload.get("id"))

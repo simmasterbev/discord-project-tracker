@@ -157,6 +157,52 @@ class DashboardStateTest(unittest.TestCase):
         self.assertIn('id="admin-region"', page)
         self.assertIn("function render()", page)
 
+    def test_admin_can_wire_milestones_and_reject_a_cycle_without_partial_edit(self):
+        project_id = db.create_project(42, "Website", "", 1)
+        first_id = db.create_milestone(42, "first", "First")
+        second_id = db.create_milestone(42, "second", "Second")
+        tree_id = db.create_tree(42, "roadmap", "Roadmap")
+        base = {"description": "", "unlocks": "", "xp": 100, "difficulty": 1,
+                "private": False, "auto_close": True, "group": "Universal",
+                "region": "Universal", "team": "Universal"}
+        dashboard.apply_admin_update({**base, "kind": "milestone", "id": second_id,
+                                      "name": "Second", "project_ids": [project_id],
+                                      "prerequisite_ids": [first_id], "tree_ids": [tree_id]})
+        state = dashboard.admin_state()
+        second = next(item for item in state["milestones"] if item["id"] == second_id)
+        self.assertEqual((second["project_ids"], second["prerequisite_ids"], second["tree_ids"]),
+                         ([project_id], [first_id], [tree_id]))
+        with self.assertRaisesRegex(ValueError, "cycle"):
+            dashboard.apply_admin_update({**base, "kind": "milestone", "id": first_id,
+                                          "name": "Should not save", "project_ids": [],
+                                          "prerequisite_ids": [second_id], "tree_ids": []})
+        self.assertEqual(db.get_milestone(42, "first")["name"], "First")
+
+    def test_admin_can_create_and_delete_live_work(self):
+        dashboard.apply_admin_update({"kind": "create_project", "name": "New project",
+                                      "description": "", "owner_id": 123, "difficulty": 2})
+        project = db.get_project(42, "New project")
+        dashboard.apply_admin_update({"kind": "create_task", "project_id": project["id"],
+                                      "title": "New task", "status": "todo", "assignee_id": "",
+                                      "due_date": "", "weight": 1})
+        task = db.list_tasks(project["id"])[0]
+        dashboard.apply_admin_update({"kind": "delete", "target": "task", "id": task["id"],
+                                      "confirm": "DELETE"})
+        self.assertEqual(db.list_tasks(project["id"]), [])
+
+    def test_admin_can_save_core_server_settings(self):
+        db.create_tree(42, "roadmap", "Roadmap")
+        dashboard.apply_admin_update({
+            "kind": "settings", "signoff_role": "123", "universal_role": "456", "layout": "tb",
+            "digest_channel": "111", "digest_weekday": 2, "digest_hour": 15,
+            "board_channel": "222", "board_weekday": 3, "board_hour": 16, "board_tree": "roadmap",
+            "stale_channel": "333", "stale_days": 5, "stale_roles": [789],
+        })
+        settings = db.get_settings(42)
+        self.assertEqual((settings["layout"], settings["signoff_role"], settings["board_tree"], settings["stale_days"]),
+                         ("tb", 123, "roadmap", 5))
+        self.assertEqual(db.stale_alert_settings(42)["roles"], [789])
+
 
 if __name__ == "__main__":
     unittest.main()

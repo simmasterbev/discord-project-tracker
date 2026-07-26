@@ -530,6 +530,19 @@ def get_settings(guild_id: int) -> sqlite3.Row:
     return rows[0]
 
 
+def update_settings(guild_id: int, **fields: Any) -> None:
+    """Patch the small, scalar server settings managed by the web editor."""
+    allowed = {"signoff_role", "universal_role", "layout", "digest_channel", "digest_weekday",
+               "digest_hour", "board_channel", "board_weekday", "board_hour", "board_tree",
+               "stale_channel", "stale_days"}
+    sets = {key: value for key, value in fields.items() if key in allowed}
+    if not sets:
+        return
+    get_settings(guild_id)
+    clause = ", ".join(f"{key} = ?" for key in sets)
+    _exec(f"UPDATE settings SET {clause} WHERE guild_id = ?", (*sets.values(), guild_id))
+
+
 def set_digest(guild_id: int, channel_id: int, weekday: int, hour: int) -> None:
     get_settings(guild_id)
     _exec(
@@ -640,6 +653,53 @@ def unlink_project(milestone_id: int, project_id: int) -> None:
         "DELETE FROM milestone_projects WHERE milestone_id = ? AND project_id = ?",
         (milestone_id, project_id),
     )
+
+
+def replace_milestone_wiring(milestone_id: int, project_ids: list[int],
+                             prerequisite_ids: list[int], tree_ids: list[int]) -> bool:
+    """Replace one milestone's project, prerequisite, and tree links atomically.
+
+    Returns False if the proposed prerequisites would create a cycle.
+    """
+    project_ids, prerequisite_ids, tree_ids = (sorted(set(ids)) for ids in
+                                                 (project_ids, prerequisite_ids, tree_ids))
+    if milestone_id in prerequisite_ids:
+        return False
+    with _lock:
+        c = conn()
+        try:
+            c.execute("BEGIN")
+            c.execute("DELETE FROM milestone_projects WHERE milestone_id=?", (milestone_id,))
+            c.execute("DELETE FROM milestone_deps WHERE milestone_id=?", (milestone_id,))
+            c.execute("DELETE FROM tree_members WHERE milestone_id=?", (milestone_id,))
+            c.executemany("INSERT INTO milestone_projects (milestone_id, project_id) VALUES (?, ?)",
+                          [(milestone_id, project_id) for project_id in project_ids])
+            c.executemany("INSERT INTO milestone_deps (milestone_id, requires_id) VALUES (?, ?)",
+                          [(milestone_id, prerequisite_id) for prerequisite_id in prerequisite_ids])
+            c.executemany("INSERT INTO tree_members (tree_id, milestone_id) VALUES (?, ?)",
+                          [(tree_id, milestone_id) for tree_id in tree_ids])
+            edges: dict[int, list[int]] = {}
+            for row in c.execute("SELECT milestone_id, requires_id FROM milestone_deps"):
+                edges.setdefault(row["milestone_id"], []).append(row["requires_id"])
+            seen, visiting = set(), set()
+            def visit(node: int) -> bool:
+                if node in visiting:
+                    return True
+                if node in seen:
+                    return False
+                visiting.add(node)
+                result = any(visit(parent) for parent in edges.get(node, []))
+                visiting.remove(node)
+                seen.add(node)
+                return result
+            if any(visit(node) for node in edges):
+                c.rollback()
+                return False
+            c.commit()
+            return True
+        except Exception:
+            c.rollback()
+            raise
 
 
 def milestone_projects(milestone_id: int) -> list[sqlite3.Row]:
