@@ -2175,6 +2175,12 @@ def panel_embed() -> discord.Embed:
         value="**View tree** generates the current tech-tree image.",
         inline=False,
     )
+    embed.add_field(
+        name="4. Plan or edit offline",
+        value="**Offline tools** explains the browser planner and settings editor. "
+              "**Export settings** downloads the file the editors use.",
+        inline=False,
+    )
     embed.set_footer(text="This panel expires after 15 minutes. Run /panel again whenever you need it.")
     return embed
 
@@ -2217,6 +2223,40 @@ class ControlPanel(discord.ui.View):
     async def help(self, interaction: discord.Interaction, button: discord.ui.Button):
         await help_cmd.callback(interaction)
 
+    @discord.ui.button(label="Export settings", style=discord.ButtonStyle.primary, emoji="📤", row=2)
+    async def export_settings(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await config_export.callback(interaction)
+
+    @discord.ui.button(label="Offline tools", style=discord.ButtonStyle.secondary, emoji="💻", row=2)
+    async def offline_tools(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="Offline planner and settings editor",
+            description="These two HTML files run only in your browser. They do not need hosting.",
+            colour=discord.Color.blurple(),
+        )
+        embed.add_field(
+            name="Build or edit a tech tree",
+            value="1. Open `planner.html`\n"
+                  "2. Add/edit milestones, then **Download spreadsheet**\n"
+                  "3. Run `/tree import` and attach that CSV file\n\n"
+                  "Importing the same plan again updates it instead of making duplicates.",
+            inline=False,
+        )
+        embed.add_field(
+            name="Edit server settings in bulk",
+            value="1. Click **Export settings** (or run `/config export`)\n"
+                  "2. Open the download in `config_panel.html` and edit it\n"
+                  "3. Run `/config import` and attach the edited `config.json`\n\n"
+                  "The config preview shows changes before anything is applied.",
+            inline=False,
+        )
+        embed.add_field(
+            name="Optional: use real groups in the planner",
+            value="Load the `config.json` export into `planner.html` first. Its group, region, and team menus will then match the server.",
+            inline=False,
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
 
 @bot.tree.command(name="panel", description="Open the beginner-friendly project tracker control panel")
 @app_commands.guild_only()
@@ -2230,7 +2270,7 @@ async def panel(interaction: discord.Interaction):
 async def test_panel(interaction: discord.Interaction, visual: bool = False):
     await interaction.response.defer()
     labels = {item.label for item in ControlPanel().children if isinstance(item, discord.ui.Button)}
-    expected = {"Guided setup", "New project", "Add task", "Mark done", "View tree", "Next up", "My tasks", "Help"}
+    expected = {"Guided setup", "New project", "Add task", "Mark done", "View tree", "Next up", "My tasks", "Help", "Export settings", "Offline tools"}
     if labels != expected:
         await interaction.followup.send("❌ Control-panel buttons are incomplete.")
         return
@@ -2240,7 +2280,7 @@ async def test_panel(interaction: discord.Interaction, visual: bool = False):
             embed=panel_embed(), view=ControlPanel(),
         )
     await interaction.followup.send(
-        "🧪 **Control-panel test**\n✅ All 8 beginner controls are present.\n"
+        "🧪 **Control-panel test**\n✅ All 10 beginner controls are present.\n"
         + ("✅ A working preview was posted above." if visual else "Use `visual:True` to post a preview.")
     )
 

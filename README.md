@@ -90,6 +90,9 @@ about six. They're grouped by noun.
 |---|---|
 | `/start` | Guided setup: project → tree → milestones |
 | `/panel` | Button-and-form control panel for common actions |
+| `/config export` | Download server settings for the offline settings editor |
+| `/config import file` | Preview and apply an edited settings export |
+| `/tree import file` | Preview and apply a tree CSV from the offline planner |
 | `/next [tree]` | What's ready to work on right now |
 | `/tree show [tree] [orientation]` | Draw the tree as an image |
 | `/tree confirm key [credit]` | Sign off a milestone, award its XP |
