@@ -150,6 +150,13 @@ class DashboardStateTest(unittest.TestCase):
         self.assertFalse(dashboard.admin_authorized({"Authorization": "Bearer wrong-token-with-enough-length"}))
         self.assertFalse(dashboard.admin_authorized({}))
 
+    def test_admin_editor_has_shared_search_and_tag_filters(self):
+        page = (dashboard.ROOT / "admin.html").read_text(encoding="utf-8")
+        self.assertIn('id="admin-search"', page)
+        self.assertIn('id="admin-group"', page)
+        self.assertIn('id="admin-region"', page)
+        self.assertIn("function render()", page)
+
 
 if __name__ == "__main__":
     unittest.main()
