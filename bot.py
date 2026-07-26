@@ -1823,6 +1823,149 @@ async def test_suite(interaction: discord.Interaction, visual: bool = False):
     )
 
 
+@test_group.command(name="super", description="Run the full visual tracker demonstration")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.describe(visual="Post every stage and both large tree images in this channel")
+async def test_super(interaction: discord.Interaction, visual: bool = True):
+    """Build a large disposable showcase of the tracker, then remove its data."""
+    if not may_run(interaction, "test_super"):
+        await deny(interaction, "test_super")
+        return
+    await interaction.response.defer()
+    guild_id, suffix = interaction.guild_id, secrets.token_hex(3)
+    project_ids, milestone_ids, notify_targets = [], [], []
+    tree_id = None
+    checks = []
+
+    async def show(message):
+        if visual:
+            await interaction.followup.send(message)
+
+    try:
+        projects = {}
+        for key, name, description in (
+            ("research", "Super Research", "Evidence and requirements"),
+            ("design", "Super Product Design", "Prototype and implementation"),
+            ("community", "Super Community", "Feedback and moderation"),
+            ("ops", "Super Operations", "Deployment and support"),
+        ):
+            projects[key] = db.create_project(guild_id, f"{name} {suffix}", description, interaction.user.id)
+            project_ids.append(projects[key])
+        for title, weight in (("Collect requirements", 2), ("Review evidence", 1)):
+            task = db.add_task(projects["research"], title, interaction.user.id, weight=weight)
+            db.set_task_status(task, "done")
+        task = db.add_task(projects["design"], "Draft prototype", interaction.user.id, weight=3)
+        db.set_task_status(task, "done")
+        task = db.add_task(projects["design"], "Run usability pass", interaction.user.id, weight=2)
+        db.set_task_status(task, "doing")
+        db.add_task(projects["design"], "Polish handoff", interaction.user.id, weight=1)
+        for title in ("Collect feedback", "Publish guidelines"):
+            task = db.add_task(projects["community"], title, interaction.user.id)
+            db.set_task_status(task, "done")
+        task = db.add_task(projects["ops"], "Resolve deployment issue", interaction.user.id, weight=2)
+        db.set_task_status(task, "blocked")
+        db.add_task(projects["ops"], "Write support runbook", interaction.user.id)
+        db.set_project_tags(projects["design"], grp="Product", region="Demo Lab", team="Core")
+        db.add_log(projects["design"], interaction.user.id, "Super test note: prototype is ready for review.")
+        checks.append("4 projects, weighted tasks, assignees, notes, and all task states")
+        await show("📁 **4 temporary projects created** — weighted progress, assignees, notes, and todo/doing/blocked/done states are covered.")
+
+        tree_key = f"super-{suffix}"
+        tree_id = db.create_tree(guild_id, tree_key, "Super Test Showcase", "A large disposable feature demonstration")
+        db.set_tree_tags(tree_id, grp="Super Test", region="Demo Lab", team="Showcase")
+        specs = [
+            ("research", "Research complete", "Unlocks design", "Research is finished.", 150, True, 2, False, "Research"),
+            ("community", "Community ready", "Unlocks moderation", "Feedback loop established.", 125, True, 1.5, False, "Community"),
+            ("budget", "Budget approved", "Unlocks funding", "A clean starting gate.", 100, True, 2.5, False, "Operations"),
+            ("legal", "Legal review", "Unlocks partnerships", "Ready for review.", 100, True, 3, True, "Operations"),
+            ("design", "Product design", "Unlocks prototype", "Prototype is being refined.", 175, True, 4, False, "Product"),
+            ("prototype", "Prototype build", "Unlocks beta", "A locked branch with multiple prerequisites.", 250, True, 5, False, "Product"),
+            ("early-demo", "Early demo", "Shows early completion", "Completed early on purpose.", 75, True, 1, False, "Product"),
+            ("moderation", "Moderation plan", "Unlocks beta", "Available after community readiness.", 100, True, 2, False, "Community"),
+            ("signoff", "Community sign-off", "Unlocks launch planning", "Done, but awaits manual sign-off.", 100, False, 2, False, "Community"),
+            ("funding", "Funding secured", "Unlocks launch planning", "Blocked behind budget.", 150, True, 4, False, "Operations"),
+            ("partnerships", "Partner agreements", "Unlocks training", "A branch merge.", 200, True, 6, True, "Community"),
+            ("beta", "Private beta", "Unlocks content", "Requires product and moderation.", 250, True, 6.5, False, "Product"),
+            ("training", "Team training", "Unlocks launch planning", "Ready after partners.", 100, True, 3.5, False, "Community"),
+            ("content", "Launch content", "Unlocks public launch", "Locked behind beta.", 150, True, 4.5, False, "Product"),
+            ("launch-plan", "Launch plan", "Unlocks public launch", "Three branches converge here.", 250, True, 7, False, "Operations"),
+            ("public-launch", "Public launch", "Unlocks retrospective", "The big visible milestone.", 500, True, 8, False, "Product"),
+            ("retrospective", "Retrospective", "Closes the showcase", "Review what worked.", 100, True, 1.5, False, "Community"),
+            ("operations", "Operations hardening", "Unlocks support", "Includes a blocked task branch.", 175, True, 5.5, False, "Operations"),
+            ("support", "Support handoff", "Final support state", "Depends on operations.", 125, True, 3, False, "Operations"),
+            ("safety", "Safety review", "Unlocks launch plan", "A second convergence branch.", 150, True, 5, True, "Operations"),
+        ]
+        mids = {}
+        for key, name, unlocks, description, xp, auto_close, difficulty, private, group in specs:
+            mids[key] = db.create_milestone(guild_id, f"{key}-{suffix}", name, unlocks, xp, description, auto_close, difficulty, private, group, "Demo Lab", "Showcase")
+            milestone_ids.append(mids[key])
+            db.add_to_tree(tree_id, mids[key])
+            db.set_announce_on_close(mids[key], True)
+        for key in ("research", "community", "design", "signoff", "operations"):
+            project_key = "research" if key == "signoff" else ("ops" if key == "operations" else key)
+            db.link_project(mids[key], projects[project_key])
+        deps = {
+            "design": ["research"], "prototype": ["research", "design"], "early-demo": ["design"],
+            "moderation": ["community"], "signoff": ["community"], "funding": ["budget"],
+            "partnerships": ["community", "legal"], "beta": ["prototype", "moderation"],
+            "training": ["partnerships"], "content": ["beta"],
+            "launch-plan": ["funding", "partnerships", "training", "safety"],
+            "public-launch": ["launch-plan", "content"], "retrospective": ["public-launch"],
+            "support": ["operations"], "safety": ["operations", "legal"],
+        }
+        for child, parents in deps.items():
+            for parent in parents:
+                if not db.add_dep(mids[child], mids[parent]):
+                    raise AssertionError(f"dependency rejected: {parent} -> {child}")
+        db.complete_milestone(mids["early-demo"], interaction.user.id)
+        db.append_milestone_note(mids["prototype"], interaction.user.id, "Super test audit note.")
+        db.add_notify(guild_id, "tree", tree_id, "user", interaction.user.id)
+        notify_targets.append(("tree", tree_id, "user", interaction.user.id))
+        db.add_notify(guild_id, "milestone", mids["public-launch"], "user", interaction.user.id)
+        notify_targets.append(("milestone", mids["public-launch"], "user", interaction.user.id))
+        before = {node["key"]: node for node in db.tree_view(guild_id, tree_key)}
+        if before[f"design-{suffix}"]["state"] != "active" or before[f"prototype-{suffix}"]["state"] != "locked":
+            raise AssertionError("mixed active and locked states were not derived")
+        if not before[f"early-demo-{suffix}"]["out_of_order"] or before[f"signoff-{suffix}"]["state"] != "pending":
+            raise AssertionError("early or pending state was not derived")
+        if db.effective_notify(guild_id, mids["public-launch"])["user"] != [interaction.user.id] or not db.milestone_audit(mids["prototype"]):
+            raise AssertionError("notifications or audit notes were not recorded")
+        checks.append("20-node branching graph, merges, mixed states, tags, privacy, difficulty, announcements, notes, and notifications")
+        await show("🌳 **20-milestone showcase tree created** — branches, merges, tags, difficulty, private descriptions, announcements, notes, notifications, and mixed states are covered.")
+
+        awards = db.settle_milestone(guild_id, mids["research"], 150)
+        if awards.get(interaction.user.id) != 150 or not db.stuck_report(guild_id)["blocked"]:
+            raise AssertionError("XP or blocked-work report failed")
+        checks.append("XP settlement and blocked-work report")
+        await show("🎖️ **XP awarded** and the moderator blocked-work report found the intentional deployment blocker.")
+
+        nodes = db.tree_view(guild_id, tree_key)
+        for node in nodes:
+            node["people"] = await display_names(interaction.guild, node.get("people") or [])
+        edges = db.tree_edges(guild_id, nodes)
+        left_to_right = await asyncio.to_thread(tree_render.render_tree, nodes, edges, "Super Test Showcase", "lr")
+        top_to_bottom = await asyncio.to_thread(tree_render.render_tree, nodes, edges, "Super Test Showcase", "tb")
+        if left_to_right.getbuffer().nbytes < 100 or top_to_bottom.getbuffer().nbytes < 100:
+            raise AssertionError("one of the showcase images was empty")
+        checks.append("large left-to-right and top-to-bottom PNG rendering")
+        if visual:
+            await interaction.followup.send("🖼️ **Super tree — left to right:**", file=discord.File(left_to_right, filename="super-test-lr.png"))
+            await interaction.followup.send("🖼️ **Super tree — top to bottom:**", file=discord.File(top_to_bottom, filename="super-test-tb.png"))
+    except Exception as error:
+        checks.append(f"FAILED: {error}")
+    finally:
+        for scope, scope_id, kind, target_id in notify_targets:
+            db.remove_notify(guild_id, scope, scope_id, kind, target_id)
+        if tree_id is not None:
+            db.delete_tree(tree_id)
+        for milestone_id in milestone_ids:
+            db.delete_milestone(milestone_id)
+        for project_id in project_ids:
+            db.delete_project(project_id)
+    result = "\n".join(f"✅ {check}" if not check.startswith("FAILED:") else f"❌ {check}" for check in checks)
+    await interaction.followup.send(f"🧪 **Tracker super test suite**\n{result}\n\nTemporary showcase data was removed; visual messages remain in this channel.")
+
+
 @test_group.command(name="config", description="Test config export, preview, apply, and restore")
 @app_commands.default_permissions(manage_guild=True)
 @app_commands.describe(visual="Post every config stage in this channel")

@@ -101,6 +101,7 @@ about six. They're grouped by noun.
 | `/test suite [visual]` | Run broader progress, history, XP, and rendering checks |
 | `/test config [visual]` | Test config export, preview, apply, edit, and restore |
 | `/test plan [visual]` | Test JSON project, task, milestone, and tree import |
+| `/test super [visual]` | Build a large disposable showcase of the full tracker and render both tree layouts |
 | `/me` | Your open tasks across every project (private) |
 | `/task done task_id` | Complete a task; the bar updates |
 
