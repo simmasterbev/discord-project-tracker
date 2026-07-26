@@ -13,16 +13,16 @@ from typing import Iterable
 from PIL import Image, ImageDraw, ImageFont
 
 # --- palette ---------------------------------------------------------------
-BG = "#0e1116"
-GRID = "#161b22"
+BG = "#0b1220"
+GRID = "#111c2c"
 
 THEME = {
-    "locked":    {"fill": "#161b22", "edge": "#2b3240", "text": "#525c6b", "accent": "#3a4150"},
-    "available": {"fill": "#2a2008", "edge": "#f0b429", "text": "#f7dfa5", "accent": "#f0b429"},
-    "active":    {"fill": "#0d2137", "edge": "#3b82f6", "text": "#bfdbfe", "accent": "#3b82f6"},
-    "pending":   {"fill": "#241436", "edge": "#a855f7", "text": "#e9d5ff", "accent": "#a855f7"},
-    "stub":      {"fill": "#131820", "edge": "#4b5563", "text": "#9aa4b2", "accent": "#6b7280"},
-    "complete":  {"fill": "#0d2b1c", "edge": "#22c55e", "text": "#bbf7d0", "accent": "#22c55e"},
+    "locked":    {"fill": "#161f2d", "edge": "#334155", "text": "#b7c2d1", "accent": "#64748b"},
+    "available": {"fill": "#12302d", "edge": "#2dd4bf", "text": "#d9fffa", "accent": "#2dd4bf"},
+    "active":    {"fill": "#172554", "edge": "#60a5fa", "text": "#dbeafe", "accent": "#60a5fa"},
+    "pending":   {"fill": "#2b1c3c", "edge": "#c084fc", "text": "#f3e8ff", "accent": "#c084fc"},
+    "stub":      {"fill": "#1c2532", "edge": "#526276", "text": "#b7c2d1", "accent": "#8191a8"},
+    "complete":  {"fill": "#123126", "edge": "#34d399", "text": "#dcfce7", "accent": "#34d399"},
 }
 
 LABEL = {
@@ -34,29 +34,33 @@ LABEL = {
     "complete": "COMPLETE",
 }
 
-NODE_W, NODE_H = 254, 178
+NODE_W, NODE_H = 292, 190
 DUMMY_H = 20                      # cross-axis slot reserved for a routed edge
 DUMMY_W = 26
-H_GAP, V_GAP = 108, 34
-MAX_EDGE = 2600                   # downscale past this so Discord always accepts it
-PAD = 46
-TITLE_H = 74
-
-FONT_DIR = "/usr/share/fonts/truetype/dejavu"
-
-
-def _font(name: str, size: int):
-    try:
-        return ImageFont.truetype(f"{FONT_DIR}/{name}", size)
-    except OSError:
-        return ImageFont.load_default()
+H_GAP, V_GAP = 72, 30
+MAX_EDGE = 2400                   # downscale past this so Discord always accepts it
+PAD = 40
+TITLE_H = 78
+MAX_LAYER_ROWS = 4
 
 
-F_TITLE = _font("DejaVuSans-Bold.ttf", 26)
-F_NAME = _font("DejaVuSans-Bold.ttf", 15)
-F_SMALL = _font("DejaVuSans.ttf", 11)
-F_TAG = _font("DejaVuSans-Bold.ttf", 9)
-F_PILL = _font("DejaVuSans.ttf", 10)
+def _font(bold: bool, size: int):
+    names = ("DejaVuSans-Bold.ttf", "arialbd.ttf") if bold else ("DejaVuSans.ttf", "arial.ttf")
+    roots = ("/usr/share/fonts/truetype/dejavu", "C:/Windows/Fonts", "")
+    for root in roots:
+        for name in names:
+            try:
+                return ImageFont.truetype(f"{root}/{name}" if root else name, size)
+            except OSError:
+                pass
+    return ImageFont.load_default()
+
+
+F_TITLE = _font(True, 28)
+F_NAME = _font(True, 16)
+F_SMALL = _font(False, 12)
+F_TAG = _font(True, 10)
+F_PILL = _font(False, 10)
 
 
 # --- layout ----------------------------------------------------------------
@@ -169,27 +173,9 @@ def _wrap(draw, text: str, font, max_w: int, max_lines: int) -> list[str]:
     return lines
 
 
-def _draw_pips(target, difficulty, cx, top, accent):
-    """Ten difficulty pips, centred, half-steps supported. Pips are 12px so a
-    half-fill is unambiguous. Empty = ring, half = left semicircle + ring,
-    full = solid disc."""
-    from PIL import ImageDraw as _Dr
-    d = _Dr.Draw(target)
-    diff = max(1.0, min(10.0, float(difficulty)))
-    R, GAP, N = 6, 4, 10
-    strip = N * (2 * R) + (N - 1) * GAP
-    sx = cx - strip // 2
-    for i in range(N):
-        px = sx + i * (2 * R + GAP)
-        box = [px, top, px + 2 * R, top + 2 * R]
-        filled = diff - i
-        if filled >= 1:
-            d.ellipse(box, fill=accent)
-        elif filled >= 0.5:
-            d.ellipse(box, outline=accent, width=1)
-            d.pieslice(box, start=90, end=270, fill=accent)
-        else:
-            d.ellipse(box, outline=accent, width=1)
+def difficulty_label(value) -> str:
+    difficulty = max(1.0, min(10.0, float(value or 1)))
+    return f"DIFFICULTY {difficulty:g}/10" if difficulty > 1 else ""
 
 
 def render_tree(
@@ -222,21 +208,28 @@ def render_tree(
             return NODE_W, NODE_H
         return (DUMMY_W, NODE_H) if tb else (NODE_W, DUMMY_H)
 
-    if tb:
-        main_start, main_step = TITLE_H + PAD // 2, NODE_H + V_GAP
-        cross_start, cross_gap = PAD, H_GAP
-    else:
-        main_start, main_step = PAD, NODE_W + H_GAP
-        cross_start, cross_gap = TITLE_H + PAD // 2, V_GAP
-
     origin: dict[str, tuple[int, int]] = {}
-    for layer, keys in order.items():
-        c = cross_start
-        main = main_start + layer * main_step
-        for k in keys:
-            w, h = size(k)
-            origin[k] = (c, main) if tb else (main, c)
-            c += (w if tb else h) + cross_gap
+    if tb:
+        for layer, keys in order.items():
+            x = PAD
+            y = TITLE_H + PAD // 2 + layer * (NODE_H + V_GAP)
+            for k in keys:
+                w, _ = size(k)
+                origin[k] = (x, y)
+                x += w + H_GAP
+    else:
+        # Dense layers used to form one extremely tall column. Split a large
+        # logical layer into at most three visual lanes while preserving every
+        # dependency's left-to-right direction.
+        lane_cols = min(3, max(1, (max(len(keys) for keys in order.values()) + MAX_LAYER_ROWS - 1)
+                               // MAX_LAYER_ROWS))
+        for layer, keys in order.items():
+            rows = (len(keys) + lane_cols - 1) // lane_cols
+            for i, k in enumerate(keys):
+                lane, row = divmod(i, rows)
+                x = PAD + (layer * lane_cols + lane) * (NODE_W + H_GAP)
+                y = TITLE_H + PAD // 2 + row * (NODE_H + V_GAP)
+                origin[k] = (x, y)
 
     def box(k) -> tuple[int, int, int, int]:
         x0, y0 = origin[k]
@@ -249,16 +242,17 @@ def render_tree(
     img = Image.new("RGB", (width, height), BG)
     d = ImageDraw.Draw(img)
 
-    for x in range(0, width, 34):
+    for x in range(0, width, 48):
         d.line([(x, 0), (x, height)], fill=GRID, width=1)
-    for y in range(0, height, 34):
+    for y in range(0, height, 48):
         d.line([(0, y), (width, y)], fill=GRID, width=1)
 
-    d.text((PAD, 26), title, font=F_TITLE, fill="#e6edf3")
+    d.text((PAD, 26), title, font=F_TITLE, fill="#f1f5f9")
     own = [n for n in nodes if not n.get("external_from")]
     done = sum(1 for n in own if n["state"] == "complete")
-    d.text((width - PAD - 190, 33), f"{done}/{len(own)} milestones unlocked",
-           font=F_SMALL, fill="#8b949e")
+    summary = f"{done}/{len(own)} milestones unlocked"
+    d.text((width - PAD - d.textlength(summary, font=F_SMALL), 35), summary,
+           font=F_SMALL, fill="#8fa1b8")
 
     def mid_y(k):
         _, y0, _, y1 = box(k)
@@ -327,43 +321,42 @@ def render_tree(
         stub = n.get("is_stub") and not ext
         if stub:
             t = THEME["stub"]
-        inner = NODE_W - 26
+        inner = NODE_W - 32
 
-        if n["state"] == "available" and not ext and not stub:  # glow the actionable
-            for g in range(7, 0, -2):
-                d.rounded_rectangle([x0 - g, y0 - g, x1 + g, y1 + g], radius=14 + g,
-                                    outline="#5a4408", width=1)
-
-        border = 1 if ext else (3 if n["state"] != "locked" else 2)
-        d.rounded_rectangle([x0, y0, x1, y1], radius=13, fill=t["fill"],
+        d.rounded_rectangle([x0 + 3, y0 + 5, x1 + 3, y1 + 5], radius=16, fill="#070c14")
+        border = 1 if ext else 2
+        d.rounded_rectangle([x0, y0, x1, y1], radius=16, fill=t["fill"],
                             outline=t["edge"], width=border)
+        d.rounded_rectangle([x0, y0, x0 + 5, y1], radius=3, fill=t["accent"])
 
         tag = ("NEEDS DEFINING" if stub
                else f"FROM {ext.upper()}"[:18] if ext
                else LABEL["early"] if n.get("out_of_order")
                else LABEL[n["state"]])
         tw = d.textlength(tag, font=F_TAG)
-        d.rounded_rectangle([x0 + 12, y0 + 11, x0 + 24 + tw, y0 + 27], radius=6,
+        d.rounded_rectangle([x0 + 16, y0 + 14, x0 + 30 + tw, y0 + 34], radius=8,
                             fill="#30363d" if (ext or stub) else t["accent"])
-        d.text((x0 + 18, y0 + 15), tag, font=F_TAG,
+        d.text((x0 + 23, y0 + 19), tag, font=F_TAG,
                fill=t["text"] if (ext or stub) else "#0e1116")
 
         if n.get("xp"):
             xp = f"{n['xp']} XP"
-            d.text((x1 - 12 - d.textlength(xp, font=F_TAG), y0 + 16), xp,
+            d.text((x1 - 16 - d.textlength(xp, font=F_TAG), y0 + 19), xp,
                    font=F_TAG, fill=t["text"])
 
-        # difficulty pips, centred along the top edge, 10 half-step positions
-        _draw_pips(img, n.get("difficulty") or 1, (x0 + x1) // 2, y0 + 6, t["accent"])
+        level = difficulty_label(n.get("difficulty"))
+        if level:
+            d.text((x1 - 16 - d.textlength(level, font=F_TAG), y0 + 39), level,
+                   font=F_TAG, fill="#8b9bb0")
 
         # bottom block is anchored first so nodes stay aligned whatever the text
         people = n.get("people") or []
-        bar_y = y1 - (74 if people else 56)
+        bar_y = y1 - (72 if people else 52)
 
-        cur_y = y0 + 36
+        cur_y = y0 + 47
         for line in _wrap(d, n["name"], F_NAME, inner, 2):
-            d.text((x0 + 13, cur_y), line, font=F_NAME, fill=t["text"])
-            cur_y += 18
+            d.text((x0 + 16, cur_y), line, font=F_NAME, fill=t["text"])
+            cur_y += 20
 
         if n.get("private"):
             desc = "🔒 restricted — details hidden"
@@ -376,45 +369,45 @@ def render_tree(
             for line in _wrap(d, desc, F_SMALL, inner, 2):
                 if cur_y + 14 > bar_y - 4:      # never let it crowd the bar
                     break
-                d.text((x0 + 13, cur_y), line, font=F_SMALL, fill="#8b949e")
-                cur_y += 14
+                d.text((x0 + 16, cur_y), line, font=F_SMALL, fill="#a6b3c4")
+                cur_y += 15
 
-        d.rounded_rectangle([x0 + 13, bar_y, x1 - 13, bar_y + 8], radius=4, fill="#21262d")
+        d.rounded_rectangle([x0 + 16, bar_y, x1 - 16, bar_y + 7], radius=4, fill="#263244")
         pct = max(0, min(100, int(n.get("pct", 0))))
         if pct:
             fill_w = int(inner * pct / 100)
-            d.rounded_rectangle([x0 + 13, bar_y, x0 + 13 + max(fill_w, 8), bar_y + 8],
+            d.rounded_rectangle([x0 + 16, bar_y, x0 + 16 + max(fill_w, 8), bar_y + 7],
                                 radius=4, fill=t["accent"])
 
         payoff = n.get("closed_label") or n.get("unlocks") or ""
         foot = f"{pct}%" + (f"  ·  {payoff}" if payoff else "")
-        d.text((x0 + 13, bar_y + 13), _wrap(d, foot, F_SMALL, inner, 1)[0],
-               font=F_SMALL, fill="#8b949e")
+        d.text((x0 + 16, bar_y + 13), _wrap(d, foot, F_SMALL, inner, 1)[0],
+               font=F_SMALL, fill="#a6b3c4")
 
         # tracking tags in the lower-left corner (only the non-Universal ones)
         tags = [v for v in (n.get("grp"), n.get("region"), n.get("team"))
                 if v and v != "Universal"]
         if tags:
             label = " · ".join(tags)
-            d.text((x0 + 13, y1 - 17),
-                   _wrap(d, label, F_TAG, inner, 1)[0], font=F_TAG, fill="#6b7684")
+            d.text((x0 + 16, y1 - 17),
+                   _wrap(d, label, F_TAG, inner, 1)[0], font=F_TAG, fill="#7f8da1")
 
         if people:
-            px, py = x0 + 13, bar_y + 32
+            px, py = x0 + 16, bar_y + 31
             shown, overflow = people[:3], max(0, len(people) - 3)
             for who in shown:
                 who = str(who)
                 label = who if len(who) <= 12 else who[:11] + "…"
                 w = d.textlength(label, font=F_PILL)
-                if px + w + 16 > x1 - 13:
+                if px + w + 16 > x1 - 16:
                     overflow += 1
                     continue
                 d.rounded_rectangle([px, py, px + w + 12, py + 16], radius=8,
-                                    fill="#21262d", outline=t["accent"], width=1)
+                                    fill="#1d2938", outline=t["accent"], width=1)
                 d.text((px + 6, py + 3), label, font=F_PILL, fill=t["text"])
                 px += w + 18
             if overflow:
-                d.text((px, py + 3), f"+{overflow}", font=F_PILL, fill="#8b949e")
+                d.text((px, py + 3), f"+{overflow}", font=F_PILL, fill="#a6b3c4")
 
     if max(img.size) > MAX_EDGE:            # keep it inside Discord's upload limit
         scale = MAX_EDGE / max(img.size)

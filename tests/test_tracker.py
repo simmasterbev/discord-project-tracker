@@ -362,24 +362,44 @@ class TestRendering(Base):
             depth, order, _ = tree_render.plan_layout(nodes, self.EDGES)
             real = {n["key"] for n in nodes}
             tb = mode == "tb"
-            ms, step = ((tree_render.TITLE_H + tree_render.PAD // 2,
-                         tree_render.NODE_H + tree_render.V_GAP) if tb
-                        else (tree_render.PAD, tree_render.NODE_W + tree_render.H_GAP))
-            cs, gap = ((tree_render.PAD, tree_render.H_GAP) if tb
-                       else (tree_render.TITLE_H + tree_render.PAD // 2, tree_render.V_GAP))
+            origins = {}
+            if tb:
+                for layer, keys in order.items():
+                    x = tree_render.PAD
+                    y = tree_render.TITLE_H + tree_render.PAD // 2 + layer * (
+                        tree_render.NODE_H + tree_render.V_GAP
+                    )
+                    for k in keys:
+                        w = tree_render.NODE_W if k in real else tree_render.DUMMY_W
+                        origins[k] = (x, y)
+                        x += w + tree_render.H_GAP
+            else:
+                lane_cols = min(3, max(1, (max(len(keys) for keys in order.values())
+                                             + tree_render.MAX_LAYER_ROWS - 1)
+                                            // tree_render.MAX_LAYER_ROWS))
+                for layer, keys in order.items():
+                    rows = (len(keys) + lane_cols - 1) // lane_cols
+                    for i, k in enumerate(keys):
+                        lane, row = divmod(i, rows)
+                        origins[k] = (
+                            tree_render.PAD + (layer * lane_cols + lane) * (
+                                tree_render.NODE_W + tree_render.H_GAP
+                            ),
+                            tree_render.TITLE_H + tree_render.PAD // 2 + row * (
+                                tree_render.NODE_H + tree_render.V_GAP
+                            ),
+                        )
             stray = 0
             for layer, keys in order.items():
-                c, main = cs, ms + layer * step
                 for k in keys:
                     w, h = ((tree_render.NODE_W, tree_render.NODE_H) if k in real
                             else ((tree_render.DUMMY_W, tree_render.NODE_H) if tb
                                   else (tree_render.NODE_W, tree_render.DUMMY_H)))
-                    x0, y0 = (c, main) if tb else (main, c)
+                    x0, y0 = origins[k]
                     if k in real:
                         inner = im.crop((x0 + 14, y0 + 14, x0 + w - 14, y0 + h - 14))
                         stray += sum(n for n, col in inner.getcolors(maxcolors=300000)
                                      if col == EDGE_GREY)
-                    c += (w if tb else h) + gap
             self.assertLess(stray, 50, f"{mode}: {stray} edge pixels inside nodes")
 
     def test_oversized_tree_is_capped(self):
@@ -390,6 +410,15 @@ class TestRendering(Base):
         edges = [(f"n{i}", f"n{i + 7}") for i in range(53)]
         im = Image.open(tree_render.render_tree(many, edges, "big"))
         self.assertLessEqual(max(im.size), tree_render.MAX_EDGE)
+
+    def test_dense_layer_uses_multiple_lanes(self):
+        from PIL import Image
+        nodes = [{"key": f"n{i}", "name": f"Node {i}", "description": "",
+                  "state": "available", "pct": 0, "xp": 100, "unlocks": "",
+                  "people": []} for i in range(12)]
+        im = Image.open(tree_render.render_tree(nodes, [], "dense"))
+        self.assertLess(im.height, 1000)
+        self.assertGreater(im.width, tree_render.NODE_W * 2)
 
     def test_cycle_in_data_does_not_hang_the_renderer(self):
         nodes = self.nodes()[:2]
@@ -562,30 +591,10 @@ class TestRenderingStage3(Base):
         calls = self._text_calls(self._node())      # all Universal
         self.assertFalse(any("Universal" in c for c in calls))
 
-    def test_difficulty_pip_states_are_correct(self):
-        from PIL import Image, ImageDraw
-        A = (59, 130, 246)
-        for state, diff in (("empty", 0.2), ("half", 0.5), ("full", 1.0)):
-            im = Image.new("RGB", (14, 14), (14, 17, 22))
-            d = ImageDraw.Draw(im)
-            box = [1, 1, 13, 13]
-            if state == "full":
-                d.ellipse(box, fill=A)
-            elif state == "half":
-                d.ellipse(box, outline=A, width=1)
-                d.pieslice(box, start=90, end=270, fill=A)
-            else:
-                d.ellipse(box, outline=A, width=1)
-            px = im.load()
-            centre = px[7, 7]
-            left = px[4, 7]
-            if state == "full":
-                self.assertEqual(centre, A)
-            elif state == "half":
-                self.assertEqual(left, A)            # left half filled
-                self.assertNotEqual(px[10, 7], A)    # right half not
-            else:
-                self.assertNotEqual(centre, A)       # hollow
+    def test_difficulty_label_is_compact(self):
+        self.assertEqual(tree_render.difficulty_label(1), "")
+        self.assertEqual(tree_render.difficulty_label(3.5), "DIFFICULTY 3.5/10")
+        self.assertEqual(tree_render.difficulty_label(99), "DIFFICULTY 10/10")
 
 
 class TestConfigRoundTrip(Base):
