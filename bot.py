@@ -1501,7 +1501,7 @@ async def tree_remove(interaction: discord.Interaction, key: str):
 @test_group.command(name="smoke", description="Run a temporary end-to-end tracker check")
 @app_commands.default_permissions(manage_guild=True)
 @app_commands.describe(visible="Post each test step and the tree image in this channel")
-async def test_smoke(interaction: discord.Interaction, visible: bool = False):
+async def test_smoke(interaction: discord.Interaction, visible: bool = True):
     """Exercise the core tracker flow without leaving test data behind."""
     if not may_run(interaction, "test_smoke"):
         await deny(interaction, "test_smoke")
