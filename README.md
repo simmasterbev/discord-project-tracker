@@ -93,6 +93,7 @@ about six. They're grouped by noun.
 | `/tree show [tree] [orientation]` | Draw the tree as an image |
 | `/tree confirm key [credit]` | Sign off a milestone, award its XP |
 | `/test smoke` | Run a temporary end-to-end check in the current channel |
+| `/test suite [visual]` | Run broader progress, history, XP, and rendering checks |
 | `/me` | Your open tasks across every project (private) |
 | `/task done task_id` | Complete a task; the bar updates |
 

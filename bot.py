@@ -1594,6 +1594,110 @@ async def test_smoke(interaction: discord.Interaction, visible: bool = True):
     )
 
 
+@test_group.command(name="suite", description="Run broader tracker behavior checks")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.describe(visual="Post every stage and both tree images in this channel")
+async def test_suite(interaction: discord.Interaction, visual: bool = False):
+    if not may_run(interaction, "test_suite"):
+        await deny(interaction, "test_suite")
+        return
+
+    await interaction.response.defer()
+    guild_id = interaction.guild_id
+    suffix = secrets.token_hex(3)
+    project_id = tree_id = gate_id = next_id = None
+    checks: list[str] = []
+
+    async def show(message: str) -> None:
+        if visual:
+            await interaction.followup.send(message)
+
+    try:
+        project_id = db.create_project(
+            guild_id, f"Suite Test {suffix}", "temporary", interaction.user.id
+        )
+        heavy = db.add_task(project_id, "Heavy task", interaction.user.id, weight=3)
+        light = db.add_task(project_id, "Light task", interaction.user.id, weight=1)
+        if db.progress(project_id)["pct"] != 0:
+            raise AssertionError("weighted project did not start at 0%")
+        db.set_task_status(heavy, "doing")
+        if db.progress(project_id)["doing"] != 1:
+            raise AssertionError("doing status was not recorded")
+        db.set_task_status(heavy, "done")
+        if db.progress(project_id)["pct"] != 75:
+            raise AssertionError("weighted progress was not 75%")
+        checks.append("weighted progress and task statuses")
+        await show("📊 Weighted progress: **75%** after the heavy task; status changes work.")
+
+        db.add_log(project_id, interaction.user.id, "Suite test note")
+        if not db.recent_log(project_id) or db.recent_log(project_id)[0]["body"] != "Suite test note":
+            raise AssertionError("project note was not recorded")
+        checks.append("project notes and history")
+        await show("📝 Project note recorded and visible in history.")
+
+        tree_key = f"suite-{suffix}"
+        tree_id = db.create_tree(guild_id, tree_key, "Temporary Suite Test")
+        gate_key = f"suite-gate-{suffix}"
+        next_key = f"suite-next-{suffix}"
+        gate_id = db.create_milestone(guild_id, gate_key, "Suite gate", xp=100)
+        next_id = db.create_milestone(guild_id, next_key, "Suite unlock")
+        db.add_to_tree(tree_id, gate_id)
+        db.add_to_tree(tree_id, next_id)
+        if not db.add_dep(next_id, gate_id):
+            raise AssertionError("dependency link was rejected")
+        db.link_project(gate_id, project_id)
+        before = {n["key"]: n for n in db.tree_view(guild_id, tree_key)}
+        if before[next_key]["state"] != "locked":
+            raise AssertionError("dependent milestone was not locked")
+        checks.append("dependency locking")
+        await show("🔒 **Suite unlock** is locked behind **Suite gate**.")
+
+        db.set_task_status(light, "done")
+        after = {n["key"]: n for n in db.tree_view(guild_id, tree_key)}
+        if after[gate_key]["state"] != "complete" or after[next_key]["state"] != "available":
+            raise AssertionError("completion did not unlock the dependent milestone")
+        awards = db.settle_milestone(guild_id, gate_id, 100)
+        if awards.get(interaction.user.id) != 100:
+            raise AssertionError("XP was not awarded")
+        checks.append("unlock and XP settlement")
+        await show("✅ **Suite gate** reached 100%; **Suite unlock** is available; 100 XP awarded.")
+
+        nodes = db.tree_view(guild_id, tree_key)
+        edges = db.tree_edges(guild_id, nodes)
+        left_to_right = await asyncio.to_thread(
+            tree_render.render_tree, nodes, edges, "Temporary Suite Test", "lr"
+        )
+        top_to_bottom = await asyncio.to_thread(
+            tree_render.render_tree, nodes, edges, "Temporary Suite Test", "tb"
+        )
+        if left_to_right.getbuffer().nbytes < 100 or top_to_bottom.getbuffer().nbytes < 100:
+            raise AssertionError("one of the tree images was empty")
+        checks.append("left-to-right and top-to-bottom rendering")
+        if visual:
+            await interaction.followup.send(
+                "🖼️ **Left to right tree:**", file=discord.File(left_to_right, filename="suite-lr.png")
+            )
+            await interaction.followup.send(
+                "🖼️ **Top to bottom tree:**", file=discord.File(top_to_bottom, filename="suite-tb.png")
+            )
+    except Exception as error:
+        checks.append(f"FAILED: {error}")
+    finally:
+        if tree_id is not None:
+            db.delete_tree(tree_id)
+        for milestone_id in (next_id, gate_id):
+            if milestone_id is not None:
+                db.delete_milestone(milestone_id)
+        if project_id is not None:
+            db.delete_project(project_id)
+
+    result = "\n".join(f"✅ {check}" if not check.startswith("FAILED:") else f"❌ {check}" for check in checks)
+    await interaction.followup.send(
+        f"🧪 **Tracker comprehensive test suite**\n{result}\n\n"
+        "Temporary test data was removed; any visual messages remain in this channel."
+    )
+
+
 @bot.tree.command(name="start",
                   description="Guided setup — project, then a tree, then milestones")
 @app_commands.guild_only()
