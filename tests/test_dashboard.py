@@ -78,7 +78,7 @@ class DashboardStateTest(unittest.TestCase):
 
     def test_dashboard_includes_the_bev_idle_animation(self):
         self.assertIn('/assets/prophet-bev-bubble-monkey.webp', dashboard.PAGE)
-        self.assertIn('animation:bev-idle', dashboard.PAGE)
+        self.assertIn('animation:bev-jump', dashboard.PAGE)
         self.assertTrue((dashboard.ROOT / "assets" / "prophet-bev-bubble-monkey.webp").is_file())
 
 
