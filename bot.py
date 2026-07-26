@@ -1828,6 +1828,7 @@ async def help_cmd(interaction: discord.Interaction):
 @app_commands.describe(tree="Limit to one tree")
 @app_commands.autocomplete(tree=tree_autocomplete)
 async def next_up(interaction: discord.Interaction, tree: str | None = None):
+    await interaction.response.defer()
     nodes = await asyncio.to_thread(db.tree_view, interaction.guild_id, tree)
     if not nodes:
         await interaction.followup.send(
@@ -2093,6 +2094,155 @@ async def leaderboard(interaction: discord.Interaction):
     )
     e.set_footer(text="XP is split across everyone whose tasks fed the milestone.")
     await interaction.response.send_message(embed=e)
+
+
+class PanelProjectModal(discord.ui.Modal, title="Create a project"):
+    name = discord.ui.TextInput(
+        label="Project name", placeholder="Community garden", max_length=80
+    )
+    description = discord.ui.TextInput(
+        label="What are you trying to achieve?", required=False, max_length=300,
+        style=discord.TextStyle.paragraph,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await project_new.callback(interaction, self.name.value.strip(), self.description.value.strip())
+
+
+class PanelTaskModal(discord.ui.Modal, title="Add a task"):
+    project = discord.ui.TextInput(
+        label="Project name", placeholder="Community garden", max_length=80
+    )
+    title = discord.ui.TextInput(
+        label="What needs doing?", placeholder="Contact local suppliers", max_length=180
+    )
+    due = discord.ui.TextInput(
+        label="Due date (optional)", placeholder="today, 5d, 2w, or 2026-08-01",
+        required=False, max_length=20,
+    )
+    weight = discord.ui.TextInput(
+        label="Effort weight (1–20)", default="1", max_length=2
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            weight = int(self.weight.value)
+            if not 1 <= weight <= 20:
+                raise ValueError
+        except ValueError:
+            await interaction.response.send_message("Weight must be a whole number from 1 to 20.", ephemeral=True)
+            return
+        await task_add.callback(
+            interaction, self.project.value.strip(), self.title.value.strip(),
+            None, self.due.value.strip() or None, weight,
+        )
+
+
+class PanelDoneModal(discord.ui.Modal, title="Mark a task done"):
+    task_id = discord.ui.TextInput(
+        label="Task number", placeholder="12", max_length=12
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = self.task_id.value.strip().lstrip("#")
+        if not raw.isdigit():
+            await interaction.response.send_message("Enter the task number, for example `12`.", ephemeral=True)
+            return
+        await task_done.callback(interaction, int(raw))
+
+
+def panel_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="Project Tracker Control Panel",
+        description=(
+            "Use the buttons below instead of remembering slash-command fields. "
+            "Start with the guided setup if this is your first project."
+        ),
+        colour=discord.Color.blurple(),
+    )
+    embed.add_field(
+        name="1. Set up your project",
+        value="**Guided setup** walks through project, tree, and milestones.",
+        inline=False,
+    )
+    embed.add_field(
+        name="2. Keep work moving",
+        value="Add tasks, mark them done, then check **Next up** for what unlocked.",
+        inline=False,
+    )
+    embed.add_field(
+        name="3. See the big picture",
+        value="**View tree** generates the current tech-tree image.",
+        inline=False,
+    )
+    embed.set_footer(text="This panel expires after 15 minutes. Run /panel again whenever you need it.")
+    return embed
+
+
+class ControlPanel(discord.ui.View):
+    """A small Discord-native dashboard that reuses the normal command handlers."""
+
+    def __init__(self):
+        super().__init__(timeout=900)
+
+    @discord.ui.button(label="Guided setup", style=discord.ButtonStyle.primary, emoji="🚀", row=0)
+    async def guided_setup(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(wizard.ProjectModal(wizard.StartFlow(interaction.user.id)))
+
+    @discord.ui.button(label="New project", style=discord.ButtonStyle.secondary, emoji="📁", row=0)
+    async def new_project(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(PanelProjectModal())
+
+    @discord.ui.button(label="Add task", style=discord.ButtonStyle.secondary, emoji="➕", row=0)
+    async def add_task(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(PanelTaskModal())
+
+    @discord.ui.button(label="Mark done", style=discord.ButtonStyle.success, emoji="✅", row=0)
+    async def mark_done(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(PanelDoneModal())
+
+    @discord.ui.button(label="View tree", style=discord.ButtonStyle.success, emoji="🌳", row=1)
+    async def view_tree(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await tree_show.callback(interaction, None, None)
+
+    @discord.ui.button(label="Next up", style=discord.ButtonStyle.primary, emoji="🧭", row=1)
+    async def next_step(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await next_up.callback(interaction, None)
+
+    @discord.ui.button(label="My tasks", style=discord.ButtonStyle.secondary, emoji="📋", row=1)
+    async def my_tasks(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await me.callback(interaction)
+
+    @discord.ui.button(label="Help", style=discord.ButtonStyle.secondary, emoji="❓", row=1)
+    async def help(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await help_cmd.callback(interaction)
+
+
+@bot.tree.command(name="panel", description="Open the beginner-friendly project tracker control panel")
+@app_commands.guild_only()
+async def panel(interaction: discord.Interaction):
+    await interaction.response.send_message(embed=panel_embed(), view=ControlPanel())
+
+
+@test_group.command(name="panel", description="Check that the control panel is ready to use")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.describe(visual="Post a working panel preview in this channel")
+async def test_panel(interaction: discord.Interaction, visual: bool = False):
+    await interaction.response.defer()
+    labels = {item.label for item in ControlPanel().children if isinstance(item, discord.ui.Button)}
+    expected = {"Guided setup", "New project", "Add task", "Mark done", "View tree", "Next up", "My tasks", "Help"}
+    if labels != expected:
+        await interaction.followup.send("❌ Control-panel buttons are incomplete.")
+        return
+    if visual:
+        await interaction.followup.send(
+            "🧪 **Control-panel preview** — try any button below.",
+            embed=panel_embed(), view=ControlPanel(),
+        )
+    await interaction.followup.send(
+        "🧪 **Control-panel test**\n✅ All 8 beginner controls are present.\n"
+        + ("✅ A working preview was posted above." if visual else "Use `visual:True` to post a preview.")
+    )
 
 
 if __name__ == "__main__":

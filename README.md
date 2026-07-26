@@ -89,6 +89,7 @@ about six. They're grouped by noun.
 | Command | What it does |
 |---|---|
 | `/start` | Guided setup: project → tree → milestones |
+| `/panel` | Button-and-form control panel for common actions |
 | `/next [tree]` | What's ready to work on right now |
 | `/tree show [tree] [orientation]` | Draw the tree as an image |
 | `/tree confirm key [credit]` | Sign off a milestone, award its XP |
@@ -313,6 +314,10 @@ Broader checks are available as `/test suite` and `/test config`. Add
 `visual:True` to either one to show each stage and its results in the channel.
 New features must extend one of these tests or add a focused `/test <feature>`
 command with the same visual option.
+
+`/panel` is the beginner-friendly alternative to typing command fields. It has
+buttons for guided setup, projects, tasks, completion, the tree, next steps,
+personal tasks, and help. Run `/test panel visual:True` to post a working preview.
 
 ---
 
