@@ -8,7 +8,7 @@ Type=simple
 User=opc
 WorkingDirectory=/opt/discord-project-tracker
 EnvironmentFile=/etc/tracker-dashboard.env
-ExecStart=/opt/discord-project-tracker/.venv/bin/python dashboard.py
+ExecStart=/usr/bin/python3 dashboard.py
 Restart=on-failure
 RestartSec=5
 
