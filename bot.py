@@ -223,6 +223,23 @@ async def project_view(interaction: discord.Interaction, name: str):
     )
 
 
+@project_group.command(name="difficulty", description="Set a project's difficulty")
+@app_commands.autocomplete(name=project_autocomplete)
+@app_commands.describe(difficulty="1-10, half steps allowed")
+async def project_difficulty(interaction: discord.Interaction, name: str,
+                             difficulty: app_commands.Range[float, 1.0, 10.0]):
+    project = await resolve(interaction, name)
+    if not project:
+        return
+    if not can_manage(interaction, project):
+        await interaction.response.send_message(
+            "Only the project owner or a server manager can change difficulty.", ephemeral=True)
+        return
+    await asyncio.to_thread(db.set_project_difficulty, project["id"], difficulty)
+    await interaction.response.send_message(
+        f"🎯 **{project['name']}** is now difficulty {difficulty:g}/10.")
+
+
 @project_group.command(name="log", description="Post a status update to a project")
 @app_commands.autocomplete(name=project_autocomplete)
 @app_commands.describe(note="What changed, what's blocked, what's next")
