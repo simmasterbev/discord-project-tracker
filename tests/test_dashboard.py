@@ -33,6 +33,7 @@ class DashboardStateTest(unittest.TestCase):
         public_id = db.create_milestone(42, "public", "Public milestone")
         private_id = db.create_milestone(42, "private", "Private milestone", private=True)
         tree_id = db.create_tree(42, "roadmap", "Roadmap")
+        db.set_milestone_tags(public_id, grp="Demo", region="Global", team="Leadership")
         db.link_project(public_id, project_id)
         db.add_to_tree(tree_id, public_id)
         db.add_to_tree(tree_id, private_id)
@@ -41,6 +42,7 @@ class DashboardStateTest(unittest.TestCase):
 
         self.assertEqual([node["key"] for node in state["milestones"]], ["public"])
         self.assertEqual(state["trees"][0]["members"], ["public"])
+        self.assertEqual(state["milestones"][0]["group"], "Demo")
 
     def test_project_linked_to_private_work_is_not_public(self):
         project_id = db.create_project(42, "Private project", "Do not publish", 1)

@@ -768,6 +768,7 @@ def tree_state(guild_id: int) -> list[dict[str, Any]]:
             "completed_at": m["completed_at"], "completed_by": m["completed_by"],
             "xp": m["xp"], "state": state, "pct": 100 if complete[k] else prog[k]["pct"],
             "private": bool(m["private"]),
+            "grp": m["grp"], "region": m["region"], "team": m["team"],
             "remaining": prog[k]["remaining"], "prereqs": prereqs[k],
             "blocked_by": [p for p in prereqs[k] if not complete.get(p, False)],
             "settled": bool(m["settled"]),

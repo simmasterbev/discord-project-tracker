@@ -1,0 +1,103 @@
+{
+  "projects": [
+    {
+      "name": "Demo Story",
+      "description": "A clear narrative for showing the tracker to directors.",
+      "group": "Demo",
+      "region": "Global",
+      "team": "Leadership",
+      "difficulty": 2,
+      "tasks": [
+        {"title": "Define the director outcome", "weight": 2},
+        {"title": "Select the walkthrough moments", "weight": 1}
+      ]
+    },
+    {
+      "name": "Interactive Walkthrough",
+      "description": "Demonstrate live progress, dependencies, and the dashboard.",
+      "group": "Demo",
+      "region": "Global",
+      "team": "Leadership",
+      "difficulty": 5,
+      "tasks": [
+        {"title": "Show a task moving to done", "weight": 2},
+        {"title": "Show the new path unlocking", "weight": 2},
+        {"title": "Open the live dashboard", "weight": 1}
+      ]
+    },
+    {
+      "name": "Pilot Launch",
+      "description": "Prepare a small real-world pilot after director feedback.",
+      "group": "Demo",
+      "region": "Global",
+      "team": "Leadership",
+      "difficulty": 7,
+      "tasks": [
+        {"title": "Pick a pilot team", "weight": 2},
+        {"title": "Set the first project cadence", "weight": 1}
+      ]
+    }
+  ],
+  "trees": [
+    {
+      "key": "director-demo",
+      "name": "Director Demo Roadmap",
+      "description": "A clean end-to-end showcase for the project tracker.",
+      "group": "Demo",
+      "region": "Global",
+      "team": "Leadership",
+      "milestones": [
+        {
+          "key": "demo-brief",
+          "name": "Define the outcome",
+          "description": "Agree on the story directors should see.",
+          "unlocks": "A focused walkthrough of live project progress.",
+          "xp": 50,
+          "difficulty": 2,
+          "group": "Demo",
+          "region": "Global",
+          "team": "Leadership",
+          "projects": ["Demo Story"]
+        },
+        {
+          "key": "demo-walkthrough",
+          "name": "Run the interactive walkthrough",
+          "description": "Show task progress, unlocks, and the dashboard in one flow.",
+          "unlocks": "Director feedback and pilot planning.",
+          "xp": 100,
+          "difficulty": 5,
+          "group": "Demo",
+          "region": "Global",
+          "team": "Leadership",
+          "requires": ["demo-brief"],
+          "projects": ["Interactive Walkthrough"]
+        },
+        {
+          "key": "demo-pilot",
+          "name": "Prepare the pilot",
+          "description": "Turn feedback into a practical first rollout.",
+          "unlocks": "A live team pilot with shared visibility.",
+          "xp": 150,
+          "difficulty": 7,
+          "group": "Demo",
+          "region": "Global",
+          "team": "Leadership",
+          "requires": ["demo-walkthrough"],
+          "projects": ["Pilot Launch"]
+        },
+        {
+          "key": "demo-adoption",
+          "name": "Start the team pilot",
+          "description": "Use the roadmap to coordinate real work after the demo.",
+          "unlocks": "A repeatable project-tracking rhythm.",
+          "xp": 200,
+          "difficulty": 6,
+          "group": "Demo",
+          "region": "Global",
+          "team": "Leadership",
+          "requires": ["demo-pilot"]
+        }
+      ]
+    }
+  ]
+}
