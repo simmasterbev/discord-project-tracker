@@ -1,0 +1,16 @@
+[Unit]
+Description=Discord Project Tracker dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=opc
+WorkingDirectory=/opt/discord-project-tracker
+EnvironmentFile=/etc/tracker-dashboard.env
+ExecStart=/opt/discord-project-tracker/.venv/bin/python dashboard.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

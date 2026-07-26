@@ -705,6 +705,7 @@ def tree_state(guild_id: int) -> list[dict[str, Any]]:
             "auto_close": bool(m["auto_close"]), "is_stub": bool(m["is_stub"]),
             "completed_at": m["completed_at"], "completed_by": m["completed_by"],
             "xp": m["xp"], "state": state, "pct": 100 if complete[k] else prog[k]["pct"],
+            "private": bool(m["private"]),
             "remaining": prog[k]["remaining"], "prereqs": prereqs[k],
             "blocked_by": [p for p in prereqs[k] if not complete.get(p, False)],
             "settled": bool(m["settled"]),
