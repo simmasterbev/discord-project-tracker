@@ -132,6 +132,9 @@ function refresh(data){const view=filtered(data),tree=el('tree'),saved=tree.valu
 fetch('/api/state',{cache:'no-store'}).then(r=>r.ok?r.json():Promise.reject()).then(data=>{options('group',data.filters.groups,'All groups');options('region',data.filters.regions,'All regions');el('tree').onchange=()=>refresh(data);el('group').onchange=()=>refresh(data);el('region').onchange=()=>refresh(data);el('search').oninput=()=>refresh(data);refresh(data);el('updated').textContent='Last refreshed '+new Date().toLocaleString()+' · Refresh this page to pull new Discord changes.'}).catch(failed);
 </script></body></html>"""
 
+# Tree cards now include distinct difficulty and completion bars; leave enough vertical room per row.
+PAGE = PAGE.replace("max*205+60", "max*260+60").replace("row*205", "row*260")
+
 
 class Dashboard(BaseHTTPRequestHandler):
     def log_message(self, *_args: object) -> None:
