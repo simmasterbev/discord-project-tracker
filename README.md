@@ -157,6 +157,7 @@ about six. They're grouped by noun.
 | `/config level` · `unlevel` | Edit the XP ladder |
 | `/config export` · `import` | The leadership config panel round-trip |
 | `/digest set channel [weekday] [hour]` | Weekly summary and overdue list |
+| `/clear-bot-messages [channel]` | Manager-only cleanup of this bot's channel messages |
 
 ---
 

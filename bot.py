@@ -2245,6 +2245,79 @@ async def test_panel(interaction: discord.Interaction, visual: bool = False):
     )
 
 
+@bot.tree.command(name="clear-bot-messages", description="Delete this bot's messages from a channel")
+@app_commands.guild_only()
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.describe(channel="Leave blank to clean up this channel")
+async def clear_bot_messages(
+    interaction: discord.Interaction, channel: discord.TextChannel | None = None
+):
+    if not is_manager(interaction):
+        await interaction.response.send_message("This needs Manage Server permission.", ephemeral=True)
+        return
+
+    target = channel or interaction.channel
+    if not hasattr(target, "purge"):
+        await interaction.response.send_message(
+            "Choose a normal text channel, or run this inside one.", ephemeral=True
+        )
+        return
+
+    async def clear_messages(button_interaction: discord.Interaction):
+        try:
+            deleted = await target.purge(
+                limit=None,
+                check=lambda message: message.author.id == button_interaction.client.user.id,
+                bulk=True,
+                reason=f"Bot-message cleanup requested by {button_interaction.user}",
+            )
+        except discord.Forbidden:
+            await button_interaction.followup.send(
+                "I need **Manage Messages** and **Read Message History** in that channel.",
+                ephemeral=True,
+            )
+            return
+        await button_interaction.followup.send(
+            f"Removed {len(deleted)} bot message(s) from {target.mention}.", ephemeral=True
+        )
+
+    await interaction.response.send_message(
+        embed=wizard.danger_embed(
+            f"Clear bot messages in #{target.name}?",
+            ["Every message sent by this bot in that channel"],
+            "User messages will not be touched. This cannot be undone.",
+        ),
+        view=wizard.DangerConfirm(interaction.user.id, clear_messages, label="Clear bot messages"),
+        ephemeral=True,
+    )
+
+
+@test_group.command(name="cleanup", description="Preview the bot-message cleanup confirmation")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.describe(visual="Post a harmless confirmation preview in this channel")
+async def test_cleanup(interaction: discord.Interaction, visual: bool = False):
+    await interaction.response.defer(ephemeral=not visual)
+
+    async def preview_only(button_interaction: discord.Interaction):
+        await button_interaction.followup.send("Preview confirmed — no messages were deleted.", ephemeral=True)
+
+    if visual:
+        await interaction.followup.send(
+            "🧪 **Cleanup confirmation preview** — this test cannot delete messages.",
+            embed=wizard.danger_embed(
+                "Clear bot messages in #example?",
+                ["Only messages sent by the bot"],
+                "User messages stay safe.",
+            ),
+            view=wizard.DangerConfirm(interaction.user.id, preview_only, label="Preview only"),
+        )
+    await interaction.followup.send(
+        "🧪 **Cleanup test**\n✅ Manager-only command uses a two-click confirmation.\n"
+        + ("✅ A harmless visual preview was posted above." if visual else "Use `visual:True` for a preview."),
+        ephemeral=not visual,
+    )
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
