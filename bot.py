@@ -19,6 +19,7 @@ import re
 import secrets
 import time
 from datetime import date, datetime, timedelta, timezone
+from typing import Optional
 
 import discord
 from discord import app_commands
@@ -304,8 +305,8 @@ async def task_add(
     interaction: discord.Interaction,
     project: str,
     title: str,
-    assignee: discord.Member | None = None,
-    due: str | None = None,
+    assignee: Optional[discord.Member] = None,
+    due: Optional[str] = None,
     weight: app_commands.Range[int, 1, 20] = 1,
 ):
     p = await resolve(interaction, project)
@@ -373,7 +374,7 @@ async def task_status(
 
 @task_group.command(name="assign", description="Hand a task to someone")
 async def task_assign(
-    interaction: discord.Interaction, task_id: int, member: discord.Member | None = None
+    interaction: discord.Interaction, task_id: int, member: Optional[discord.Member] = None
 ):
     t = db.get_task(interaction.guild_id, task_id)
     if not t:
@@ -392,8 +393,8 @@ async def task_assign(
 async def task_list(
     interaction: discord.Interaction,
     project: str,
-    status: app_commands.Choice[str] | None = None,
-    assignee: discord.Member | None = None,
+    status: Optional[app_commands.Choice[str]] = None,
+    assignee: Optional[discord.Member] = None,
 ):
     p = await resolve(interaction, project)
     if not p:
@@ -444,7 +445,7 @@ test_group = app_commands.Group(
 @config_group.command(name="signoff", description="Which role may sign off milestones")
 @app_commands.describe(role="Leave blank to restrict sign-off to Manage Server only")
 @app_commands.default_permissions(manage_guild=True)
-async def config_signoff(interaction: discord.Interaction, role: discord.Role | None = None):
+async def config_signoff(interaction: discord.Interaction, role: Optional[discord.Role] = None):
     db.set_signoff_role(interaction.guild_id, role.id if role else None)
     if role:
         await interaction.response.send_message(
@@ -496,8 +497,8 @@ async def digest_set(
                        weekday="0 = Monday … 6 = Sunday", hour="Hour of day, UTC")
 @app_commands.default_permissions(manage_guild=True)
 async def config_board(interaction: discord.Interaction,
-                       channel: discord.TextChannel | None = None,
-                       tree: str | None = None,
+                       channel: Optional[discord.TextChannel] = None,
+                       tree: Optional[str] = None,
                        weekday: app_commands.Range[int, 0, 6] = 0,
                        hour: app_commands.Range[int, 0, 23] = 9):
     if not is_manager(interaction):
@@ -1027,8 +1028,8 @@ class OrientationView(discord.ui.View):
     app_commands.Choice(name="left to right", value="lr"),
     app_commands.Choice(name="top to bottom", value="tb"),
 ])
-async def tree_show(interaction: discord.Interaction, tree: str | None = None,
-                    orientation: app_commands.Choice[str] | None = None):
+async def tree_show(interaction: discord.Interaction, tree: Optional[str] = None,
+                    orientation: Optional[app_commands.Choice[str]] = None):
     await interaction.response.defer()
     if tree and not db.get_tree(interaction.guild_id, tree):
         await interaction.followup.send(
@@ -1071,9 +1072,9 @@ async def tree_show(interaction: discord.Interaction, tree: str | None = None,
                        group="Group (overrides the project's)", region="Region", team="Team")
 @app_commands.autocomplete(project=project_autocomplete)
 async def tree_new(interaction: discord.Interaction, key: str, name: str,
-                   description: str = "", project: str | None = None,
-                   group: str | None = None, region: str | None = None,
-                   team: str | None = None):
+                   description: str = "", project: Optional[str] = None,
+                   group: Optional[str] = None, region: Optional[str] = None,
+                   team: Optional[str] = None):
     if db.get_tree(interaction.guild_id, key):
         await interaction.response.send_message(f"`{key}` already exists.", ephemeral=True)
         return
@@ -1234,7 +1235,7 @@ async def tree_add(
     unlocks: str = "",
     requires: str = "",
     xp: app_commands.Range[int, 0, 5000] = 100,
-    tree: str | None = None,
+    tree: Optional[str] = None,
     auto_close: bool = True,
     difficulty: app_commands.Range[float, 1.0, 10.0] = 1.0,
     private: bool = False,
@@ -1306,17 +1307,17 @@ async def tree_add(
 async def tree_edit(
     interaction: discord.Interaction,
     key: str,
-    name: str | None = None,
-    description: str | None = None,
-    unlocks: str | None = None,
-    xp: app_commands.Range[int, 0, 5000] | None = None,
-    auto_close: bool | None = None,
-    difficulty: app_commands.Range[float, 1.0, 10.0] | None = None,
-    private: bool | None = None,
-    group: str | None = None,
-    region: str | None = None,
-    team: str | None = None,
-    announce: bool | None = None,
+    name: Optional[str] = None,
+    description: Optional[str] = None,
+    unlocks: Optional[str] = None,
+    xp: Optional[app_commands.Range[int, 0, 5000]] = None,
+    auto_close: Optional[bool] = None,
+    difficulty: Optional[app_commands.Range[float, 1.0, 10.0]] = None,
+    private: Optional[bool] = None,
+    group: Optional[str] = None,
+    region: Optional[str] = None,
+    team: Optional[str] = None,
+    announce: Optional[bool] = None,
 ):
     m = db.get_milestone(interaction.guild_id, key)
     if not m:
@@ -1525,8 +1526,8 @@ async def tree_import(interaction: discord.Interaction, file: discord.Attachment
 @app_commands.autocomplete(tree=tree_autocomplete, key=milestone_autocomplete)
 @app_commands.describe(tree="Limit to one tree (whole-server if blank)",
                        key="A milestone key — shows its closures and notes together")
-async def tree_history(interaction: discord.Interaction, tree: str | None = None,
-                       key: str | None = None):
+async def tree_history(interaction: discord.Interaction, tree: Optional[str] = None,
+                       key: Optional[str] = None):
     # with a key, show that one milestone's full story: closure + note trail
     if key:
         m = db.get_milestone(interaction.guild_id, key)
@@ -2219,7 +2220,7 @@ async def stuck(interaction: discord.Interaction,
 @app_commands.guild_only()
 @app_commands.describe(tree="Limit to one tree")
 @app_commands.autocomplete(tree=tree_autocomplete)
-async def next_up(interaction: discord.Interaction, tree: str | None = None):
+async def next_up(interaction: discord.Interaction, tree: Optional[str] = None):
     await interaction.response.defer()
     nodes = await asyncio.to_thread(db.tree_view, interaction.guild_id, tree)
     if not nodes:
@@ -2362,8 +2363,8 @@ def resolve_notify_scope(guild_id: int, scope: str, key: str) -> int | None:
                        role="Role to ping (or use person)", person="Person to ping (or use role)")
 @app_commands.default_permissions(manage_guild=True)
 async def config_notify(interaction: discord.Interaction, scope: app_commands.Choice[str],
-                        key: str, role: discord.Role | None = None,
-                        person: discord.Member | None = None):
+                        key: str, role: Optional[discord.Role] = None,
+                        person: Optional[discord.Member] = None):
     if not is_manager(interaction):
         await interaction.response.send_message("This needs Manage Server permission.", ephemeral=True)
         return
@@ -2390,8 +2391,8 @@ async def config_notify(interaction: discord.Interaction, scope: app_commands.Ch
 @app_commands.describe(scope="Project, tree, or milestone", key="Its name or key")
 @app_commands.default_permissions(manage_guild=True)
 async def config_unnotify(interaction: discord.Interaction, scope: app_commands.Choice[str],
-                          key: str, role: discord.Role | None = None,
-                          person: discord.Member | None = None):
+                          key: str, role: Optional[discord.Role] = None,
+                          person: Optional[discord.Member] = None):
     if not is_manager(interaction):
         await interaction.response.send_message("This needs Manage Server permission.", ephemeral=True)
         return
@@ -2444,7 +2445,7 @@ async def config_notifies(interaction: discord.Interaction, key: str):
                        role="Leave blank to reopen the command to everyone")
 @app_commands.default_permissions(manage_guild=True)
 async def config_permission(interaction: discord.Interaction, command: str,
-                            role: discord.Role | None = None):
+                            role: Optional[discord.Role] = None):
     command = command.strip().lstrip("/").replace(" ", "_")
     db.set_cmd_perm(interaction.guild_id, command, role.id if role else None)
     if role:
@@ -2477,7 +2478,7 @@ async def config_permissions(interaction: discord.Interaction):
 @app_commands.describe(role="Leave blank to limit it to Manage Server")
 @app_commands.default_permissions(manage_guild=True)
 async def config_universal_role(interaction: discord.Interaction,
-                                role: discord.Role | None = None):
+                                role: Optional[discord.Role] = None):
     db.set_universal_role(interaction.guild_id, role.id if role else None)
     who = role.mention if role else "people with Manage Server"
     await interaction.response.send_message(f"Setting items **Universal** now needs {who}.")
@@ -2779,7 +2780,7 @@ async def test_panel(interaction: discord.Interaction, visual: bool = False):
 @app_commands.default_permissions(manage_guild=True)
 @app_commands.describe(channel="Leave blank to clean up this channel")
 async def clear_bot_messages(
-    interaction: discord.Interaction, channel: discord.TextChannel | None = None
+    interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None
 ):
     if not is_manager(interaction):
         await interaction.response.send_message("This needs Manage Server permission.", ephemeral=True)
