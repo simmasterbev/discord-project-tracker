@@ -218,7 +218,9 @@ function removeNode(i){
   nodes.forEach(n => n.req = n.req.filter(r => r !== gone));
   render();
 }
-function set(i,k,v){ nodes[i][k] = v; render(); }
+// Text fields should not rebuild the editor: replacing its HTML drops focus and
+// puts the caret somewhere else. Only the preview needs a live refresh.
+function set(i,k,v){ nodes[i][k] = v; renderBoard(); }
 function toggleTag(i,on){
   nodes[i].tagged = on;
   if (on){ nodes[i].grp ||= treeScope.grp; nodes[i].region ||= treeScope.region;
@@ -246,11 +248,10 @@ function setProject(i,key,value){
   projects[i][key] = value;
   if (key === "name" && old !== value)
     nodes.forEach(n => n.projects = (n.projects||[]).map(name => name === old ? value : name));
-  render();
 }
 function addTask(i){ projects[i].tasks.push({title:"", weight:1, due:"", assignee:""}); render(); }
 function removeTask(i,j){ projects[i].tasks.splice(j,1); render(); }
-function setTask(i,j,key,value){ projects[i].tasks[j][key] = value; render(); }
+function setTask(i,j,key,value){ projects[i].tasks[j][key] = value; }
 function toggleProject(i,name){
   const links = nodes[i].projects ||= [], at = links.indexOf(name);
   at < 0 ? links.push(name) : links.splice(at,1);
@@ -368,6 +369,10 @@ function render(){
     </div>`;
   }).join("");
 
+  renderBoard();
+}
+
+function renderBoard(){
   const t = tiers(), depths = Object.keys(t).sort((a,b)=>a-b);
   document.getElementById("board").innerHTML = depths.length ? depths.map(d=>`
     <div class="tier"><h4>${d==0?"Open from the start":"After "+d+" gate"+(d>1?"s":"")}</h4>
