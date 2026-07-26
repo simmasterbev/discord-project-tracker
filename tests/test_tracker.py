@@ -303,6 +303,40 @@ class TestImport(Base):
     def test_missing_header_is_reported(self):
         self.assertTrue(seed.parse("foo,bar\n1,2\n", "x.csv")["problems"])
 
+    def test_taxonomy_columns_apply(self):
+        csv = ("tree,milestone,group,region,team\n"
+               "T,Tagged,Forum,Delaware,Ops\n")
+        seed.apply_doc(seed.parse(csv, "t.csv"), G, 0)
+        m = db.get_milestone(G, "tagged")
+        self.assertEqual((m["grp"], m["region"], m["team"]), ("Forum", "Delaware", "Ops"))
+
+    def test_difficulty_column_applies(self):
+        seed.apply_doc(seed.parse("tree,milestone,difficulty\nT,Hard,7.5\n", "d.csv"), G, 0)
+        self.assertEqual(db.get_milestone(G, "hard")["difficulty"], 7.5)
+
+    def test_private_column_applies(self):
+        seed.apply_doc(seed.parse("tree,milestone,private\nT,Secret,true\n", "p.csv"), G, 0)
+        self.assertEqual(db.get_milestone(G, "secret")["private"], 1)
+        seed.apply_doc(seed.parse("tree,milestone,private\nT,Open,false\n", "o.csv"), G, 0)
+        self.assertEqual(db.get_milestone(G, "open")["private"], 0)
+
+    def test_yaml_friendly_group_key_maps_to_grp(self):
+        y = ("milestones:\n"
+             "  - key: m\n    name: M\n    group: Aviation\n"
+             "    region: Broome\n    difficulty: 4\n    private: true\n")
+        seed.apply_doc(seed.parse(y, "plan.yaml"), G, 0)
+        m = db.get_milestone(G, "m")
+        self.assertEqual(m["grp"], "Aviation")       # `group` -> `grp`
+        self.assertEqual(m["region"], "Broome")
+        self.assertEqual(m["difficulty"], 4.0)
+        self.assertEqual(m["private"], 1)
+
+    def test_plain_csv_defaults_to_universal(self):
+        seed.apply_doc(seed.parse("tree,milestone\nT,Plain\n", "p.csv"), G, 0)
+        m = db.get_milestone(G, "plain")
+        self.assertEqual(m["grp"], "Universal")
+        self.assertEqual(m["difficulty"], 1.0)
+
 
 class TestRendering(Base):
     def nodes(self):

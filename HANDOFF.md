@@ -160,7 +160,7 @@ Discord.
    Stage-2 guided wizard (modal→select→modal chains) has *only* been verified to
    construct, never clicked through in a live client. That's the biggest untested
    surface in the codebase.
-1. **Tests exist now** — `python -m unittest discover tests`, 66 of them. They
+1. **Tests exist now** — `python -m unittest discover tests`, 71 of them. They
    were mutation-checked: breaking the cycle guard, the even split, the
    double-mint guard, `auto_close`, weighted progress, the credit list, or the
    bulk-query map each makes them fail. Two mutations they do *not* catch are

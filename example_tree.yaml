@@ -1,5 +1,13 @@
 # Every field the seeder understands. Copy this, gut it, make it yours.
 # Apply with:  python seed.py example_tree.yaml --guild YOUR_SERVER_ID
+#
+# group / region / team tag a milestone. The VALUES themselves are managed in
+# Discord with /config tag-add (or the config panel), not here — this file just
+# references them. A value not yet configured still applies; add it with
+# /config tag-add so it appears in dropdowns. Omit the tags for Universal.
+#
+# difficulty is 1-10 (half steps), default 1. private:true hides the description
+# on the rendered image and gates it to assignees / permitted roles / managers.
 
 # ---------------------------------------------------------------------------
 # PROJECTS hold the actual work. Milestones read their completion percentage.
@@ -46,7 +54,11 @@ trees:
         description: SOW agreed with both consultants   # what it IS
         unlocks: funders will actually read it          # what it BUYS you
         xp: 150                                  # split across contributors
+        difficulty: 3                            # 1-10, half steps ok (default 1)
         projects: [scope-doc]                    # completion is read from these
+        group: Program                           # group / region / team, or omit
+        region: Delaware                         # for Universal (visible to all)
+        team: Strategy
         # no `requires` -> this is a root, open from day one
 
       - key: funding
@@ -54,8 +66,13 @@ trees:
         description: Match commitments confirmed in writing
         unlocks: everything downstream stops being hypothetical
         xp: 400
+        difficulty: 7.5                          # renders as pips on the node
+        private: true                            # description hidden -> 🔒 restricted;
+                                                 # only assignees, a permitted role,
+                                                 # or a manager can read it
         projects: [budget]
         requires: [scope]                        # stays locked until scope is done
+        group: Program
 
       - key: buildout
         name: Site build-out begins

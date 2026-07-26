@@ -1,5 +1,6 @@
-tree,milestone,description,unlocks,requires,xp,auto_close
-Candidate forum,Venue booked,Call three halls; compare quotes; sign; pay deposit,the date becomes announceable,,150,true
-Candidate forum,Panel confirmed,Four candidates agree in writing,promotion can start,Venue booked,250,true
-Candidate forum,Promotion live,Flyers; press release; social push,turnout,Panel confirmed; Funding secured,400,false
-Program build-out,Scope locked,SOW agreed with both consultants,funders will read it,,150,true
+tree,milestone,description,unlocks,requires,xp,auto_close,difficulty,private,group,region,team
+Candidate forum,Venue booked,Call three halls; compare quotes; sign; pay deposit,the date becomes announceable,,150,true,2,false,Forum,Delaware,Logistics
+Candidate forum,Panel confirmed,Four candidates agree in writing,promotion can start,Venue booked,250,true,3,false,Forum,Delaware,Outreach
+Candidate forum,Promotion live,Flyers; press release; social push,turnout,Panel confirmed; Funding secured,400,false,4,false,Forum,Delaware,Outreach
+Program build-out,Scope locked,SOW agreed with both consultants,funders will read it,,150,true,3,false,Program,Universal,Strategy
+Program build-out,Funding secured,Match commitments confirmed,downstream stops being hypothetical,Scope locked,400,false,7.5,true,Program,Universal,Finance

@@ -255,12 +255,17 @@ bot's heartbeat.
 Two HTML files run entirely in a browser — nothing is sent anywhere.
 
 **`planner.html`** — build a tree visually and export it as a CSV, then load it
-with `/tree import`. The route to give anyone who won't touch a command line.
+with `/tree import`. It can load a `config.json` from the config panel to tag
+milestones with your real groups/regions/teams as you build, so the two tools
+share one vocabulary. Milestones carry everything the bot supports — difficulty,
+privacy flag, group/region/team — not just name and dependencies. The pages link to each other via a nav bar; each still
+exports its own file (a tree CSV from the planner, config JSON from the panel).
 
 **`config_panel.html`** — leadership tool for setting permissions, taxonomy,
 sign-off, universal-role, and levels in bulk. Run `/config export` to download a
 file carrying the current settings *and your role list*, open it in the panel so
-its dropdowns show real role names, edit, and apply with `/config import`. To
+its dropdowns show real role names and its command list matches the live bot,
+edit, and apply with `/config import`. To
 gate to a role that isn't in the export, add it in the panel's **Roles** section
 by name and ID (right-click the role in Discord → Copy ID); the bot matches by
 ID, so a role added without one is flagged and won't apply.
@@ -279,7 +284,7 @@ never be locked out of them.
 python -m unittest discover tests
 ```
 
-66 tests, standard library only. They cover state derivation, weighted progress,
+71 tests, standard library only. They cover state derivation, weighted progress,
 XP settling once, cycle refusal, stubs, tree views, migrations, levels, taxonomy
 scope-filtering, privacy gates, command permissions, the audit log, the config
 round-trip, and rendering in both orientations. They're mutation-checked: the

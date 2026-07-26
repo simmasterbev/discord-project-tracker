@@ -1512,9 +1512,9 @@ async def help_cmd(interaction: discord.Interaction):
     )
     e.add_field(
         name="Easiest way in",
-        value="**`/start`** — a pop-up form. Name the tree, then fill in up to four "
-              "milestones, typing their steps one per line. Everything gets wired "
-              "together for you.",
+        value="**`/start`** — a guided walk-through. It sets up a project, then a "
+              "tree, then its milestones with fill-in-the-blank forms, wiring the "
+              "prerequisites together as you go.",
         inline=False,
     )
     e.add_field(
@@ -1530,7 +1530,7 @@ async def help_cmd(interaction: discord.Interaction):
         value="`/tree add` — another milestone\n"
               "`/task add` — another step\n"
               "`/tree requires` — connect two milestones\n"
-              "`seed.py` — bulk-load a whole tree from a file",
+              "`/tree import` — bulk-load a whole tree from a spreadsheet",
         inline=False,
     )
     await interaction.response.send_message(embed=e, ephemeral=True)
@@ -1716,6 +1716,12 @@ async def config_export(interaction: discord.Interaction):
     doc = await asyncio.to_thread(db.export_config, interaction.guild_id)
     # include the server's roles so the offline panel can show real names
     doc["_roles"] = {str(r.id): r.name for r in interaction.guild.roles if not r.is_default()}
+    # include the live command list so the panel's dropdown never goes stale
+    doc["_commands"] = sorted(
+        c.qualified_name.replace(" ", "_")
+        for c in interaction.client.tree.walk_commands()
+        if not isinstance(c, app_commands.Group)
+    )
     buf = io.BytesIO(json.dumps(doc, indent=2).encode())
     await interaction.response.send_message(
         "Here's the current config. Open it in `config_panel.html`, edit, and send "

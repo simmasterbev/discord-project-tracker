@@ -35,6 +35,13 @@
     color:var(--ink);padding:8px 10px;font:inherit;font-size:14px}
   textarea{resize:vertical;min-height:52px}
   input:focus,textarea:focus{outline:2px solid var(--ready);outline-offset:1px;border-color:transparent}
+  .topnav{display:flex;gap:2px;padding:0 24px;border-bottom:1px solid var(--line);
+          background:var(--surface)}
+  .topnav a{padding:11px 16px;color:var(--muted);text-decoration:none;font-size:13px;
+            border-bottom:2px solid transparent;font-family:var(--sans)}
+  .topnav a:hover{color:var(--ink)}
+  .topnav a.active{color:var(--ink);border-bottom-color:var(--ready)}
+
   .field{margin-bottom:12px}
   .row2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 
@@ -78,6 +85,7 @@
 </style>
 </head>
 <body>
+<nav class="topnav"><a href="planner.html" class="active">🌳 Tree planner</a><a href="config_panel.html">⚙️ Config panel</a></nav>
 <header>
   <h1>Tree planner</h1>
   <p>Lay out your milestones here, then download a spreadsheet file and hand it to
@@ -89,6 +97,26 @@
     <div class="field">
       <label for="treename">Tree name</label>
       <input type="text" id="treename" value="Candidate forum" oninput="render()">
+    </div>
+    <div class="field" style="background:var(--surface);border:1px solid var(--line);
+         border-radius:9px;padding:12px 14px">
+      <label>Groups, regions, teams</label>
+      <p class="hint" style="margin:2px 0 8px">Load a <code>config.json</code> from
+        the Config panel's <code>/config export</code> to tag milestones with your
+        real groups. Without it, tagging is free-text.
+        <label for="taxfile" style="display:inline;text-transform:none;letter-spacing:0;
+          color:var(--ready);cursor:pointer;font-family:var(--sans)">load config.json</label>
+        <input type="file" id="taxfile" accept=".json" style="display:none"></p>
+      <div class="row2">
+        <div class="field"><label for="tree-grp">Group</label>
+          <select id="tree-grp" onchange="setTreeScope()"></select></div>
+        <div class="field"><label for="tree-region">Region</label>
+          <select id="tree-region" onchange="setTreeScope()"></select></div>
+      </div>
+      <div class="field"><label for="tree-team">Team</label>
+        <select id="tree-team" onchange="setTreeScope()"></select></div>
+      <p class="hint" id="tax-status" style="margin:6px 0 0">Milestones inherit the
+        tree's tags; change them per-milestone below if needed.</p>
     </div>
     <div id="editor"></div>
     <button onclick="addNode()">+ Add milestone</button>
@@ -120,8 +148,57 @@ let nodes = [
 
 const esc = s => (s||"").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
+// taxonomy loaded from a config.json export; empty until then
+let taxonomy = {grp:["Universal"], region:["Universal"], team:["Universal"]};
+let treeScope = {grp:"Universal", region:"Universal", team:"Universal"};
+
+function taxOptions(kind, selected){
+  return taxonomy[kind].map(v =>
+    `<option value="${esc(v)}" ${v===selected?"selected":""}>${esc(v)}</option>`).join("");
+}
+
+function fillTreeScopeMenus(){
+  for (const k of ["grp","region","team"]){
+    const el = document.getElementById("tree-"+k);
+    if (el) el.innerHTML = taxOptions(k, treeScope[k]);
+  }
+}
+
+function setTreeScope(){
+  treeScope = {
+    grp: document.getElementById("tree-grp").value,
+    region: document.getElementById("tree-region").value,
+    team: document.getElementById("tree-team").value,
+  };
+  // milestones with no explicit tag follow the tree
+  nodes.forEach(n => { if (!n.tagged) { n.grp=null; n.region=null; n.team=null; } });
+  render();
+}
+
+function loadTaxonomy(doc){
+  const t = doc.taxonomy || {};
+  for (const k of ["grp","region","team"])
+    taxonomy[k] = ["Universal", ...(t[k]||[]).filter(v=>v!=="Universal")];
+  fillTreeScopeMenus();
+  const counts = ["grp","region","team"].map(k=>taxonomy[k].length-1);
+  document.getElementById("tax-status").textContent =
+    `Loaded ${counts[0]} groups, ${counts[1]} regions, ${counts[2]} teams. `
+    + `Milestones inherit the tree's tags unless you override them.`;
+  render();
+}
+
+document.getElementById("taxfile").addEventListener("change", e=>{
+  const f = e.target.files[0]; if(!f) return;
+  const r = new FileReader();
+  r.onload = () => { try{ loadTaxonomy(JSON.parse(r.result)); }
+                     catch{ document.getElementById("tax-status").textContent =
+                            "That file isn't valid JSON."; } };
+  r.readAsText(f);
+});
+
+
 function addNode(){
-  nodes.push({name:"", desc:"", unlocks:"", req:[], xp:100, auto:true});
+  nodes.push({name:"", desc:"", unlocks:"", req:[], xp:100, auto:true, difficulty:1, private:false});
   render();
   setTimeout(()=>document.querySelector(`#n${nodes.length-1}-name`)?.focus(), 0);
 }
@@ -132,6 +209,12 @@ function removeNode(i){
   render();
 }
 function set(i,k,v){ nodes[i][k] = v; render(); }
+function toggleTag(i,on){
+  nodes[i].tagged = on;
+  if (on){ nodes[i].grp ||= treeScope.grp; nodes[i].region ||= treeScope.region;
+           nodes[i].team ||= treeScope.team; }
+  render();
+}
 function toggleReq(i,name){
   const r = nodes[i].req, at = r.indexOf(name);
   at < 0 ? r.push(name) : r.splice(at,1);
@@ -180,12 +263,38 @@ function render(){
         <div class="field"><label for="n${i}-xp">XP</label>
           <input type="number" id="n${i}-xp" min="0" max="5000" value="${n.xp}"
                  oninput="set(${i},'xp',this.value)"></div>
+        <div class="field"><label for="n${i}-diff">Difficulty (1–10)</label>
+          <input type="number" id="n${i}-diff" min="1" max="10" step="0.5"
+                 value="${n.difficulty ?? 1}" oninput="set(${i},'difficulty',this.value)"></div>
+      </div>
+      <div class="row2">
         <div class="field"><label>Closing</label>
           <div class="toggle"><input type="checkbox" id="n${i}-a" ${n.auto?"checked":""}
                onchange="set(${i},'auto',this.checked)">
             <label for="n${i}-a" style="text-transform:none;letter-spacing:0;font-family:var(--sans);
                    font-size:13px;margin:0">Closes itself at 100%</label></div></div>
+        <div class="field"><label>Privacy</label>
+          <div class="toggle"><input type="checkbox" id="n${i}-p" ${n.private?"checked":""}
+               onchange="set(${i},'private',this.checked)">
+            <label for="n${i}-p" style="text-transform:none;letter-spacing:0;font-family:var(--sans);
+                   font-size:13px;margin:0">🔒 Hide description</label></div></div>
       </div>
+      <div class="field" style="margin-top:2px">
+        <label style="display:flex;gap:6px;align-items:center;cursor:pointer">
+          <input type="checkbox" ${n.tagged?"checked":""}
+                 onchange="toggleTag(${i},this.checked)" style="width:auto">
+          <span style="text-transform:none;letter-spacing:0;font-family:var(--sans);
+                font-size:12px;color:var(--muted)">Tag this milestone differently
+                from the tree</span></label>
+      </div>
+      ${n.tagged ? `<div class="row2" style="margin-top:6px">
+        <div class="field"><label>Group</label>
+          <select onchange="set(${i},'grp',this.value)">${taxOptions('grp',n.grp||treeScope.grp)}</select></div>
+        <div class="field"><label>Region</label>
+          <select onchange="set(${i},'region',this.value)">${taxOptions('region',n.region||treeScope.region)}</select></div>
+      </div>
+      <div class="field"><label>Team</label>
+        <select onchange="set(${i},'team',this.value)">${taxOptions('team',n.team||treeScope.team)}</select></div>` : ""}
     </div>`;
   }).join("");
 
@@ -193,9 +302,9 @@ function render(){
   document.getElementById("board").innerHTML = depths.length ? depths.map(d=>`
     <div class="tier"><h4>${d==0?"Open from the start":"After "+d+" gate"+(d>1?"s":"")}</h4>
     ${t[d].map(n=>`<div class="node ${d==0?"ready":""} ${n.auto?"":"sign"}">
-      <div class="tag">${d==0?"READY TO START":"LOCKED"}${n.auto?"":" · NEEDS SIGN-OFF"} · ${n.xp} XP</div>
-      <div class="nm">${esc(n.name)}</div>
-      <div class="dt">${esc(n.desc)||"<span class='warn'>no description yet</span>"}</div>
+      <div class="tag">${d==0?"READY TO START":"LOCKED"}${n.auto?"":" · NEEDS SIGN-OFF"} · ${n.xp} XP${(n.difficulty??1)!=1?` · diff ${n.difficulty}`:""}</div>
+      <div class="nm">${esc(n.name)}${n.private?" 🔒":""}</div>
+      <div class="dt">${n.private?"<span class='warn'>🔒 description hidden</span>":(esc(n.desc)||"<span class='warn'>no description yet</span>")}</div>
       ${n.unlocks?`<div class="dt" style="margin-top:4px">→ ${esc(n.unlocks)}</div>`:""}
       ${n.req.length?`<div class="req">after ${n.req.map(esc).join(", ")}</div>`:""}
     </div>`).join("")}</div>`).join("")
@@ -205,9 +314,24 @@ function render(){
 function csv(){
   const tree = document.getElementById("treename").value.trim() || "Untitled tree";
   const q = v => `"${String(v==null?"":v).replace(/"/g,'""')}"`;
-  const rows = [["tree","milestone","description","unlocks","requires","xp","auto_close"]];
-  nodes.filter(n=>n.name.trim()).forEach(n =>
-    rows.push([tree, n.name, n.desc, n.unlocks, n.req.join("; "), n.xp || 100, n.auto]));
+  const hasScope = treeScope.grp!=="Universal" || treeScope.region!=="Universal" ||
+                   treeScope.team!=="Universal" || nodes.some(n=>n.tagged);
+  const hasDiff = nodes.some(n => (n.difficulty ?? 1) != 1);
+  const hasPriv = nodes.some(n => n.private);
+  const head = ["tree","milestone","description","unlocks","requires","xp","auto_close"];
+  if (hasDiff) head.push("difficulty");
+  if (hasPriv) head.push("private");
+  if (hasScope) head.push("group","region","team");
+  const rows = [head];
+  nodes.filter(n=>n.name.trim()).forEach(n => {
+    const row = [tree, n.name, n.desc, n.unlocks, n.req.join("; "), n.xp || 100, n.auto];
+    if (hasDiff) row.push(n.difficulty ?? 1);
+    if (hasPriv) row.push(n.private ? "true" : "false");
+    if (hasScope) row.push(n.tagged ? (n.grp||treeScope.grp) : treeScope.grp,
+                           n.tagged ? (n.region||treeScope.region) : treeScope.region,
+                           n.tagged ? (n.team||treeScope.team) : treeScope.team);
+    rows.push(row);
+  });
   return rows.map(r => r.map(q).join(",")).join("\n");
 }
 
@@ -228,6 +352,7 @@ function copyCsv(){
   );
 }
 
+fillTreeScopeMenus();
 render();
 </script>
 </body>

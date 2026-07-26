@@ -77,6 +77,16 @@ def csv_to_doc(source) -> dict:
                     problems.append(f"row {i}: xp '{row['xp']}' isn't a number, using 100")
             if row.get("auto_close"):
                 spec["auto_close"] = row["auto_close"].lower() not in ("false", "no", "0", "n")
+            for col, key in (("group", "grp"), ("region", "region"), ("team", "team")):
+                if row.get(col, "").strip():
+                    spec[key] = row[col].strip()
+            if row.get("difficulty", "").strip():
+                try:
+                    spec["difficulty"] = float(row["difficulty"])
+                except ValueError:
+                    problems.append(f"row {i}: difficulty '{row['difficulty']}' isn't a number")
+            if row.get("private", "").strip():
+                spec["private"] = row["private"].lower() not in ("false", "no", "0", "n", "")
 
             tname = row.get("tree", "").strip()
             if tname:
@@ -120,18 +130,38 @@ def upsert_milestone(guild_id: int, spec: dict) -> int:
                             unlocks=spec.get("unlocks"), xp=spec.get("xp"),
                             auto_close=None if spec.get("auto_close") is None
                             else int(bool(spec["auto_close"])))
+        if any(k in spec for k in ("grp", "region", "team")):
+            db.set_milestone_tags(existing["id"], grp=spec.get("grp"),
+                                  region=spec.get("region"), team=spec.get("team"))
+        if "difficulty" in spec:
+            db.set_difficulty(existing["id"], spec["difficulty"])
+        if "private" in spec:
+            db.set_private(existing["id"], spec["private"])
         return existing["id"]
-    return db.create_milestone(guild_id, key, spec.get("name", key),
+    mid = db.create_milestone(guild_id, key, spec.get("name", key),
                                spec.get("unlocks", ""), int(spec.get("xp", 100)),
                                spec.get("description", ""),
-                               bool(spec.get("auto_close", True)))
+                               bool(spec.get("auto_close", True)),
+                               difficulty=spec.get("difficulty", 1.0),
+                               grp=spec.get("grp", "Universal"),
+                               region=spec.get("region", "Universal"),
+                               team=spec.get("team", "Universal"))
+    if spec.get("private"):
+        db.set_private(mid, True)
+    return mid
 
 
 def parse(text: str, filename: str) -> dict:
     """Text in, plan structure out. Used by both the CLI and `/tree import`."""
     if filename.lower().endswith((".csv", ".tsv")):
         return csv_to_doc(text)
-    return yaml.safe_load(text) or {}
+    doc = yaml.safe_load(text) or {}
+    # YAML uses the friendly key `group`; the rest of the code uses `grp`
+    for spec in ([m for t in doc.get("trees", []) for m in t.get("milestones", [])]
+                 + doc.get("milestones", [])):
+        if "group" in spec and "grp" not in spec:
+            spec["grp"] = spec.pop("group")
+    return doc
 
 
 def preview(doc: dict, guild_id: int) -> dict:

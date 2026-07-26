@@ -1,4 +1,4 @@
-tree,milestone,description,unlocks,requires,xp,auto_close
-Candidate forum,Venue booked,"Call three halls, compare quotes, sign the contract, pay the deposit",the date becomes announceable,,150,true
-Candidate forum,Panel confirmed,Four candidates agree in writing and hold the date,promotion can start,Venue booked,250,true
-Candidate forum,Promotion live,"Flyers printed, press release out, social push scheduled",turnout,Panel confirmed,400,false
+tree,milestone,description,unlocks,requires,xp,auto_close,difficulty,private
+Candidate forum,Venue booked,"Call three halls, compare quotes, sign the contract, pay the deposit",the date becomes announceable,,150,true,2,false
+Candidate forum,Panel confirmed,Four candidates agree in writing and hold the date,promotion can start,Venue booked,250,true,3,false
+Candidate forum,Promotion live,"Flyers printed, press release out, social push scheduled",turnout,Panel confirmed,400,false,4,false

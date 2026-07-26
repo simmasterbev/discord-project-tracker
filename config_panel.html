@@ -56,9 +56,17 @@
   .warn{font-size:12px;color:var(--accent)}
   code{font-family:var(--mono);font-size:12px;background:var(--ground);padding:2px 5px;border-radius:4px}
   .cmd-list{font-family:var(--mono);font-size:11px;color:var(--muted)}
+  .topnav{display:flex;gap:2px;padding:0 24px;border-bottom:1px solid var(--line);
+          background:var(--surface)}
+  .topnav a{padding:11px 16px;color:var(--muted);text-decoration:none;font-size:13px;
+            border-bottom:2px solid transparent;font-family:var(--sans)}
+  .topnav a:hover{color:var(--ink)}
+  .topnav a.active{color:var(--ink);border-bottom-color:var(--accent,#f0b429)}
+
 </style>
 </head>
 <body>
+<nav class="topnav"><a href="planner.html">🌳 Tree planner</a><a href="config_panel.html" class="active">⚙️ Config panel</a></nav>
 <header>
   <h1>Config panel</h1>
   <p>Leadership tool for setting permissions, groups, and levels in bulk. Load the
@@ -98,8 +106,7 @@
   <section>
     <h2>Command permissions</h2>
     <p class="hint">Restrict a command to a role. Manage Server always passes and
-      can't be locked out. Known commands: <span class="cmd-list">start, tree_import,
-      config_import, config_export, tree_add, tree_remove, tree_drop, project_delete</span></p>
+      can't be locked out. Pick the command from the list.</p>
     <div id="perms"></div>
     <button onclick="addPerm()">+ Add rule</button>
   </section>
@@ -136,6 +143,8 @@
 </div>
 
 <script>
+const COMMANDS_FALLBACK = ["config_export", "config_import", "config_layout", "config_level", "config_permission", "config_permissions", "config_signoff", "config_tag-add", "config_tag-remove", "config_tags", "config_universal-role", "config_unlevel", "digest_set", "help", "leaderboard", "levels", "me", "next", "project_archive", "project_delete", "project_list", "project_log", "project_new", "project_unarchive", "project_view", "start", "task_add", "task_assign", "task_delete", "task_done", "task_list", "task_status", "tree_add", "tree_complete", "tree_confirm", "tree_drop", "tree_edit", "tree_exclude", "tree_history", "tree_import", "tree_include", "tree_link", "tree_list", "tree_new", "tree_note", "tree_remove", "tree_requires", "tree_show"];
+let commands = COMMANDS_FALLBACK.slice();  // replaced by an export if loaded
 const KINDS = ["grp","region","team"];
 const KIND_LABEL = {grp:"Group",region:"Region",team:"Team"};
 let roles = {};           // id -> name, from the export
@@ -174,8 +183,10 @@ function render(){
   document.getElementById("perms").innerHTML = state.permissions.map((p,i)=>`
     <div class="row r-perm">
       <div><label>Command</label>
-        <input type="text" value="${esc(p.command)}" placeholder="tree_import"
-          oninput="state.permissions[${i}].command=this.value"></div>
+        <select onchange="state.permissions[${i}].command=this.value">
+          <option value="">— pick a command —</option>
+          ${commands.map(c=>`<option value="${c}" ${c===p.command?"selected":""}>/${c.replace(/_/g," ")}</option>`).join("")}
+        </select></div>
       <div><label>Role</label>
         <select onchange="state.permissions[${i}].role=this.value">${roleOptions(p.role)}</select></div>
       <button class="ghost rmv" onclick="state.permissions.splice(${i},1);render()">Remove</button>
@@ -187,19 +198,29 @@ function render(){
   document.getElementById("signoff").innerHTML = roleOptions(state.signoff_role);
   document.getElementById("signoff").onchange = e => state.signoff_role = e.target.value || null;
 
-  // taxonomy
-  document.getElementById("tax").innerHTML = KINDS.map(k=>`
-    <div style="margin-bottom:12px">
-      <label>${KIND_LABEL[k]}s</label>
-      <div class="row r-tax">
-        <input type="text" id="tax-${k}" placeholder="Add a ${KIND_LABEL[k].toLowerCase()}…"
-          onkeydown="if(event.key==='Enter'){addTax('${k}');event.preventDefault()}">
-        <button onclick="addTax('${k}')">Add</button>
-      </div>
-      <div class="chips">${state.taxonomy[k].map((v,i)=>
-        `<span class="chip">${esc(v)}<button onclick="state.taxonomy['${k}'].splice(${i},1);render()">✕</button></span>`
-        ).join("") || `<span class="hint">none</span>`}</div>
-    </div>`).join("");
+  // taxonomy — one row that adds group + region + team together as a set
+  document.getElementById("tax").innerHTML = `
+    <div class="row" style="grid-template-columns:1fr 1fr 1fr auto;margin-bottom:12px">
+      <div><label>Group</label>
+        <input type="text" id="tax-grp" placeholder="Aviation"
+          onkeydown="if(event.key==='Enter'){addTaxSet();event.preventDefault()}"></div>
+      <div><label>Region</label>
+        <input type="text" id="tax-region" placeholder="Delaware"
+          onkeydown="if(event.key==='Enter'){addTaxSet();event.preventDefault()}"></div>
+      <div><label>Team</label>
+        <input type="text" id="tax-team" placeholder="Ops"
+          onkeydown="if(event.key==='Enter'){addTaxSet();event.preventDefault()}"></div>
+      <button onclick="addTaxSet()">Add</button>
+    </div>
+    <p class="hint" style="margin:-4px 0 12px">Fill any of the three and press Add —
+      each non-empty value joins its list. They're independent lists, not linked rows.</p>
+    ${KINDS.map(k=>`
+      <div style="margin-bottom:10px">
+        <label>${KIND_LABEL[k]}s</label>
+        <div class="chips">${state.taxonomy[k].map((v,i)=>
+          `<span class="chip">${esc(v)}<button onclick="state.taxonomy['${k}'].splice(${i},1);render()">✕</button></span>`
+          ).join("") || `<span class="hint">none</span>`}</div>
+      </div>`).join("")}`;
 
   // levels
   document.getElementById("levels").innerHTML = state.levels
@@ -236,10 +257,18 @@ function removeRole(id){
   delete addedRoles[id];
   render();
 }
-function addTax(k){
-  const el = document.getElementById("tax-"+k);
-  const v = el.value.trim();
-  if (v && !state.taxonomy[k].includes(v)){ state.taxonomy[k].push(v); el.value=""; render(); }
+function addTaxSet(){
+  // read all three before any render wipes them, then add each non-empty value
+  const vals = {grp:document.getElementById("tax-grp").value.trim(),
+                region:document.getElementById("tax-region").value.trim(),
+                team:document.getElementById("tax-team").value.trim()};
+  let added = 0;
+  for (const k of KINDS){
+    const v = vals[k];
+    if (v && !state.taxonomy[k].includes(v)){ state.taxonomy[k].push(v); added++; }
+  }
+  if (!added){ status("Type a group, region, or team first."); return; }
+  render();     // fields are inside #tax, so this clears all three inputs
 }
 
 function build(){
@@ -274,6 +303,7 @@ function status(m){ const s=document.getElementById("status"); s.textContent=m;
 
 function loadDoc(doc){
   roles = doc._roles || {};
+  commands = (doc._commands && doc._commands.length) ? doc._commands.slice() : COMMANDS_FALLBACK.slice();
   addedRoles = {};
   state.permissions = Object.entries(doc.permissions||{}).map(([command,role])=>({command,role:String(role)}));
   state.universal_role = doc.universal_role || null;

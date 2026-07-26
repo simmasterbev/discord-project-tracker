@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS settings (
     guild_id       INTEGER PRIMARY KEY,
     signoff_role   INTEGER,
     layout         TEXT NOT NULL DEFAULT 'lr',   -- lr or tb
+    universal_role INTEGER,
 
     digest_channel INTEGER,
     digest_weekday INTEGER NOT NULL DEFAULT 0,   -- 0 = Monday
