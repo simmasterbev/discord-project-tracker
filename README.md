@@ -94,6 +94,7 @@ about six. They're grouped by noun.
 | `/tree confirm key [credit]` | Sign off a milestone, award its XP |
 | `/test smoke` | Run a temporary end-to-end check in the current channel |
 | `/test suite [visual]` | Run broader progress, history, XP, and rendering checks |
+| `/test config [visual]` | Test config export, preview, apply, edit, and restore |
 | `/me` | Your open tasks across every project (private) |
 | `/task done task_id` | Complete a task; the bar updates |
 
@@ -307,6 +308,11 @@ database records.
 For a real in-server workflow check, run `/test smoke` as a server manager.
 It creates temporary project, task, tree, dependency, XP, and image-rendering
 data, reports each result in the channel, and removes the temporary data.
+
+Broader checks are available as `/test suite` and `/test config`. Add
+`visual:True` to either one to show each stage and its results in the channel.
+New features must extend one of these tests or add a focused `/test <feature>`
+command with the same visual option.
 
 ---
 

@@ -12,6 +12,7 @@ Run with:  DISCORD_TOKEN=... python bot.py
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import os
 import re
@@ -1695,6 +1696,76 @@ async def test_suite(interaction: discord.Interaction, visual: bool = False):
     await interaction.followup.send(
         f"🧪 **Tracker comprehensive test suite**\n{result}\n\n"
         "Temporary test data was removed; any visual messages remain in this channel."
+    )
+
+
+@test_group.command(name="config", description="Test config export, preview, apply, and restore")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.describe(visual="Post every config stage in this channel")
+async def test_config(interaction: discord.Interaction, visual: bool = False):
+    if not may_run(interaction, "test_config"):
+        await deny(interaction, "test_config")
+        return
+
+    await interaction.response.defer()
+    guild_id = interaction.guild_id
+    suffix = secrets.token_hex(3)
+    original = db.export_config(guild_id)
+    valid_roles = {role.id for role in interaction.guild.roles}
+    checks: list[str] = []
+
+    async def show(message: str) -> None:
+        if visual:
+            await interaction.followup.send(message)
+
+    try:
+        if original.get("version") != 1:
+            raise AssertionError("export version is missing or unexpected")
+        checks.append("configuration export")
+        await show("📤 Exported the current server configuration.")
+
+        temporary = copy.deepcopy(original)
+        temporary["taxonomy"]["grp"].append(f"Smoke Group {suffix}")
+        temporary["taxonomy"]["region"].append(f"Smoke Region {suffix}")
+        temporary["levels"].append({"xp": 9000, "name": f"Smoke Level {suffix}", "perk": "test"})
+        preview = db.diff_config(guild_id, temporary, valid_roles)
+        if not preview["tax_add"] or not preview["level_set"]:
+            raise AssertionError("import preview did not detect the proposed changes")
+        checks.append("import preview")
+        await show("🔍 Import preview detected the temporary taxonomy and level changes.")
+
+        db.apply_config(guild_id, temporary, valid_roles)
+        applied = db.export_config(guild_id)
+        if applied["taxonomy"] != temporary["taxonomy"] or applied["levels"] != temporary["levels"]:
+            raise AssertionError("temporary configuration was not applied")
+        checks.append("configuration apply")
+        await show("✅ Applied the temporary configuration successfully.")
+
+        edited = copy.deepcopy(temporary)
+        edited["taxonomy"]["grp"].remove(f"Smoke Group {suffix}")
+        edited["levels"][-1]["name"] = f"Edited Smoke Level {suffix}"
+        changed = db.diff_config(guild_id, edited, valid_roles)
+        if not changed["tax_remove"] or not changed["level_set"]:
+            raise AssertionError("preview did not detect the edit/removal")
+        checks.append("replacement diff")
+        await show("✏️ A second preview detected an edit and a removal.")
+
+        db.apply_config(guild_id, original, valid_roles)
+        if db.export_config(guild_id) != original:
+            raise AssertionError("original configuration was not restored")
+        checks.append("safe restore")
+        await show("↩️ Restored the original server configuration.")
+    except Exception as error:
+        checks.append(f"FAILED: {error}")
+        db.apply_config(guild_id, original, valid_roles)
+
+    result = "\n".join(
+        f"✅ {check}" if not check.startswith("FAILED:") else f"❌ {check}"
+        for check in checks
+    )
+    await interaction.followup.send(
+        f"🧪 **Config export/import test**\n{result}\n\n"
+        "The original server configuration was restored."
     )
 
 

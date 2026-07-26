@@ -25,6 +25,15 @@ Don't add a status column to `milestones`.
 **XP mints once, at completion.** `settled` guards it. Test any change to
 `settle_milestone` against a double call.
 
+## Feature testing contract
+
+Every new user-facing feature must add or update a live Discord test. Extend
+`/test smoke` or `/test suite` when it fits there; otherwise add a focused
+`/test <feature>` command. The test must check the feature's expected result,
+clean up temporary data, and offer a visual option that posts the steps and
+results—including images or embeds—in the current channel. A feature is not
+finished until its test is included and documented here or in `README.md`.
+
 ## Local testing without a token
 
 Everything except the Discord layer runs headless:
