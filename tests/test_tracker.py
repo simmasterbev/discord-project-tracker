@@ -272,6 +272,7 @@ class TestMigrations(unittest.TestCase):
                 self.assertIn(column, row.keys())
             self.assertEqual(row["auto_close"], 1)
         finally:
+            db.conn().close()
             Path(path).unlink(missing_ok=True)
 
 
