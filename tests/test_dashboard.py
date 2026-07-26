@@ -53,6 +53,12 @@ class DashboardStateTest(unittest.TestCase):
         self.assertNotIn("assignee_id", json.dumps(state))
         self.assertIn("Website,Publish it,todo,2026-08-01,2,yes", task_csv)
 
+    def test_dashboard_links_to_both_offline_helpers(self):
+        self.assertIn('/tools/planner.html', dashboard.PAGE)
+        self.assertIn('/tools/config_panel.html', dashboard.PAGE)
+        self.assertTrue((dashboard.ROOT / "planner.html").is_file())
+        self.assertTrue((dashboard.ROOT / "config_panel.html").is_file())
+
 
 if __name__ == "__main__":
     unittest.main()
