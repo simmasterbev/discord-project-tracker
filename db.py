@@ -452,6 +452,24 @@ def update_task_details(task_id: int, assignee_id: Optional[int], due_date: Opti
     touch_task_project(task_id)
 
 
+def update_task(task_id: int, title: str, status: str, assignee_id: Optional[int],
+                due_date: Optional[str], weight: int) -> None:
+    """Update the editable task fields in one write.
+
+    The dashboard uses this instead of composing several partial updates, so a
+    browser save cannot leave a task half-updated if one field is invalid.
+    """
+    if status not in VALID_STATUSES:
+        raise ValueError(f"Unknown task status: {status}")
+    completed = now() if status == "done" else None
+    _exec(
+        "UPDATE tasks SET title = ?, status = ?, assignee_id = ?, due_date = ?, "
+        "weight = ?, completed_at = ? WHERE id = ?",
+        (title, status, assignee_id, due_date, weight, completed, task_id),
+    )
+    touch_task_project(task_id)
+
+
 def delete_task(task_id: int) -> None:
     rows = _q("SELECT project_id FROM tasks WHERE id = ?", (task_id,))
     _exec("DELETE FROM tasks WHERE id = ?", (task_id,))

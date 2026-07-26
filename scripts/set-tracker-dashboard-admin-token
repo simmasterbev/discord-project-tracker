@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Run as root via sudo. The token is intentionally restricted to shell-safe
+# characters so it can be stored directly in systemd's EnvironmentFile.
+set -euo pipefail
+
+if [[ ${1:-} == "--stdin" ]]; then
+  IFS= read -r token || true
+else
+  read -r -s -p "Dashboard admin token: " token
+  printf '\n'
+fi
+token=${token//$'\r'/}
+
+if [[ ! $token =~ ^[A-Za-z0-9_-]{24,}$ ]]; then
+  echo "Use at least 24 letters, numbers, hyphens, or underscores." >&2
+  exit 1
+fi
+
+env_file=/etc/tracker-dashboard.env
+tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
+[[ -f $env_file ]] && grep -v '^TRACKER_ADMIN_TOKEN=' "$env_file" > "$tmp" || true
+printf 'TRACKER_ADMIN_TOKEN=%s\n' "$token" >> "$tmp"
+install -m 600 "$tmp" "$env_file"
+systemctl restart tracker-dashboard
+systemctl is-active --quiet tracker-dashboard
+echo "Dashboard editor token saved; tracker-dashboard is running."

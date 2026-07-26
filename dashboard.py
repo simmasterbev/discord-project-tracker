@@ -1,12 +1,14 @@
-"""Read-only web dashboard for the Discord Project Progress Tracker."""
+"""Web dashboard and protected live editor for the Discord Project Progress Tracker."""
 
 from __future__ import annotations
 
 import csv
+import hmac
 import io
 import json
 import logging
 import os
+from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -104,6 +106,146 @@ def task_report(state: dict) -> bytes:
     )
 
 
+def admin_token() -> str:
+    """The dashboard editor is disabled until its server-side token is set."""
+    return os.environ.get("TRACKER_ADMIN_TOKEN", "").strip()
+
+
+def admin_authorized(headers) -> bool:
+    token = admin_token()
+    supplied = headers.get("Authorization", "")
+    return bool(token and supplied.startswith("Bearer ")
+                and hmac.compare_digest(supplied[7:], token))
+
+
+def admin_state() -> dict:
+    """Private editing data. Never expose this from the public API."""
+    gid = guild_id()
+    projects = []
+    for project in db.list_projects(gid, include_archived=True):
+        projects.append({
+            "id": project["id"], "name": project["name"], "description": project["description"],
+            "status": project["status"], "difficulty": project["difficulty"],
+            "group": project["grp"], "region": project["region"], "team": project["team"],
+            "tasks": [{"id": task["id"], "title": task["title"], "status": task["status"],
+                       "assignee_id": task["assignee_id"], "due_date": task["due_date"],
+                       "weight": task["weight"]} for task in db.list_tasks(project["id"])],
+        })
+    milestones = []
+    for milestone in db.list_milestones(gid):
+        milestones.append({
+            "id": milestone["id"], "key": milestone["key"], "name": milestone["name"],
+            "description": milestone["description"], "unlocks": milestone["unlocks"],
+            "xp": milestone["xp"], "difficulty": milestone["difficulty"],
+            "private": bool(milestone["private"]), "auto_close": bool(milestone["auto_close"]),
+            "group": milestone["grp"], "region": milestone["region"], "team": milestone["team"],
+            "projects": [project["name"] for project in db.milestone_projects(milestone["id"])],
+        })
+    return {"projects": projects, "milestones": milestones}
+
+
+def text(value: object, label: str, limit: int = 500) -> str:
+    value = str(value or "").strip()
+    if not value or len(value) > limit:
+        raise ValueError(f"{label} must be between 1 and {limit} characters.")
+    return value
+
+
+def optional_text(value: object, label: str, limit: int = 2000) -> str:
+    value = str(value or "").strip()
+    if len(value) > limit:
+        raise ValueError(f"{label} must be at most {limit} characters.")
+    return value
+
+
+def positive_int(value: object, label: str, maximum: int = 1000000) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a whole number.") from exc
+    if not 1 <= number <= maximum:
+        raise ValueError(f"{label} must be between 1 and {maximum}.")
+    return number
+
+
+def difficulty(value: object) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Difficulty must be a number from 1 to 10.") from exc
+    if not 1 <= number <= 10 or number * 2 != round(number * 2):
+        raise ValueError("Difficulty must be from 1 to 10 in half-point steps.")
+    return number
+
+
+def nullable_user_id(value: object) -> int | None:
+    value = str(value or "").strip()
+    return positive_int(value, "Assignee ID", 999999999999999999) if value else None
+
+
+def nullable_date(value: object) -> str | None:
+    value = str(value or "").strip()
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value).isoformat()
+    except ValueError as exc:
+        raise ValueError("Due date must use YYYY-MM-DD.") from exc
+
+
+def owned(rows, item_id: object, label: str):
+    item_id = positive_int(item_id, f"{label} ID", 999999999999999999)
+    row = next((row for row in rows if row["id"] == item_id), None)
+    if not row:
+        raise ValueError(f"{label} was not found for this tracker.")
+    return row
+
+
+def apply_admin_update(payload: dict) -> None:
+    """Validate and apply one narrowly-scoped dashboard edit."""
+    if not isinstance(payload, dict):
+        raise ValueError("The edit must be an object.")
+    kind = payload.get("kind")
+    gid = guild_id()
+    if kind == "project":
+        project = owned(db.list_projects(gid, include_archived=True), payload.get("id"), "Project")
+        status = payload.get("status")
+        if status not in ("active", "archived"):
+            raise ValueError("Project status must be active or archived.")
+        db.update_project(project["id"], name=text(payload.get("name"), "Project name"),
+                          description=optional_text(payload.get("description"), "Project description"))
+        db.set_project_status(project["id"], status)
+        db.set_project_difficulty(project["id"], difficulty(payload.get("difficulty")))
+        db.set_project_tags(project["id"], grp=text(payload.get("group", "Universal"), "Group", 80),
+                            region=text(payload.get("region", "Universal"), "Region", 80),
+                            team=text(payload.get("team", "Universal"), "Team", 80))
+    elif kind == "task":
+        task = db.get_task(gid, positive_int(payload.get("id"), "Task ID", 999999999999999999))
+        if not task:
+            raise ValueError("Task was not found for this tracker.")
+        status = payload.get("status")
+        if status not in db.VALID_STATUSES:
+            raise ValueError("Task status is not valid.")
+        db.update_task(task["id"], text(payload.get("title"), "Task title"), status,
+                       nullable_user_id(payload.get("assignee_id")), nullable_date(payload.get("due_date")),
+                       positive_int(payload.get("weight"), "Weight", 100))
+    elif kind == "milestone":
+        milestone = owned(db.list_milestones(gid), payload.get("id"), "Milestone")
+        db.update_milestone(milestone["id"], name=text(payload.get("name"), "Milestone name"),
+                            description=optional_text(payload.get("description"), "Milestone description"),
+                            unlocks=optional_text(payload.get("unlocks"), "Unlock description"),
+                            xp=positive_int(payload.get("xp"), "XP", 100000),
+                            auto_close=bool(payload.get("auto_close")))
+        db.set_difficulty(milestone["id"], difficulty(payload.get("difficulty")))
+        db.set_private(milestone["id"], bool(payload.get("private")))
+        db.set_milestone_tags(milestone["id"], grp=text(payload.get("group", "Universal"), "Group", 80),
+                              region=text(payload.get("region", "Universal"), "Region", 80),
+                              team=text(payload.get("team", "Universal"), "Team", 80))
+    else:
+        raise ValueError("Unknown edit type.")
+    LOG.info("Dashboard admin updated %s id=%s", kind, payload.get("id"))
+
+
 PAGE = r"""<!doctype html>
 <html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Project Tracker</title>
@@ -146,6 +288,7 @@ function refresh(data){const view=filtered(data),tree=el('tree'),saved=tree.valu
 PAGE = PAGE.replace("</body>", r"""<style>
 .node.clickable{cursor:pointer}.node.clickable:hover,.node.clickable:focus-visible{outline:2px solid var(--cyan);outline-offset:3px}.tree-detail{margin-top:14px;padding:20px;border:1px solid var(--cyan);border-radius:13px;background:#101d2ee8}.detail-top{display:flex;justify-content:space-between;align-items:center}.detail-top .eyebrow{margin:0}.detail-top button{border:1px solid var(--line);border-radius:7px;padding:7px 10px;background:#142238;color:var(--text);cursor:pointer}.tree-detail h3{margin:8px 0}.tree-detail h4{margin:22px 0 10px}.tree-detail p{color:var(--muted);line-height:1.5}.project-card{padding:0;overflow:hidden}.project-card>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:18px;cursor:pointer;list-style:none}.project-card>summary::-webkit-details-marker,.task-card>summary::-webkit-details-marker{display:none}.project-card>summary::after,.task-card>summary::after{content:'+';color:var(--cyan);font-weight:800}.project-card[open]>summary::after,.task-card[open]>summary::after{content:'−'}.project-body{padding:0 18px 18px}.project-body>p{min-height:0}.task-list{display:grid;gap:8px;margin-top:16px}.task-card{border:1px solid #ffffff18;border-radius:8px;background:#0d1623}.task-card>summary{display:flex;justify-content:space-between;gap:8px;padding:10px;cursor:pointer;list-style:none}.task-info{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;padding:0 10px 10px;color:var(--muted);font-size:12px}.task-info strong{color:var(--text)}@media(max-width:520px){.task-info{grid-template-columns:1fr}.tree-detail{padding:15px}}
 </style></body>""")
+PAGE = PAGE.replace('<a href="#reports">Reports</a>', '<a href="#reports">Reports</a><a href="/admin">Edit tracker</a>')
 
 
 class Dashboard(BaseHTTPRequestHandler):
@@ -171,6 +314,21 @@ class Dashboard(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def send_json(self, status: int, body: dict) -> None:
+        self.send(status, "application/json", json.dumps(body))
+
+    def request_json(self) -> dict:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError as exc:
+            raise ValueError("Invalid request length.") from exc
+        if not 0 < length <= 16384:
+            raise ValueError("Request must be between 1 and 16384 bytes.")
+        try:
+            return json.loads(self.rfile.read(length))
+        except json.JSONDecodeError as exc:
+            raise ValueError("Request must contain valid JSON.") from exc
+
     def do_GET(self) -> None:
         path = self.path.split("?", 1)[0]
         if path == "/healthz":
@@ -181,6 +339,17 @@ class Dashboard(BaseHTTPRequestHandler):
             except Exception:
                 LOG.exception("Dashboard state failed")
                 self.send(503, "application/json", json.dumps({"error": "Dashboard data is temporarily unavailable."}))
+        elif path == "/api/admin/state":
+            if not admin_token():
+                self.send_json(503, {"error": "The editor has not been configured on this server."})
+            elif not admin_authorized(self.headers):
+                self.send_json(401, {"error": "Admin authorization is required."})
+            else:
+                try:
+                    self.send_json(200, admin_state())
+                except Exception:
+                    LOG.exception("Dashboard admin state failed")
+                    self.send_json(503, {"error": "The editor data is temporarily unavailable."})
         elif path.startswith("/reports/"):
             try:
                 state = public_state()
@@ -199,6 +368,8 @@ class Dashboard(BaseHTTPRequestHandler):
             self.send_bytes(200, "text/html", (ROOT / "planner.html").read_bytes())
         elif path == "/tools/config_panel.html":
             self.send_bytes(200, "text/html", (ROOT / "config_panel.html").read_bytes())
+        elif path in ("/admin", "/admin/"):
+            self.send_bytes(200, "text/html", (ROOT / "admin.html").read_bytes())
         elif path == "/assets/prophet-bev-bubble-monkey-run.webp":
             self.send_bytes(200, "image/webp", (ROOT / "assets" / "prophet-bev-bubble-monkey-run.webp").read_bytes())
         elif path == "/assets/prophet-bev-bubble-monkey-wave.webp":
@@ -207,6 +378,26 @@ class Dashboard(BaseHTTPRequestHandler):
             self.send(200, "text/html", PAGE)
         else:
             self.send(404, "text/plain", "Not found\n")
+
+    def do_POST(self) -> None:
+        path = self.path.split("?", 1)[0]
+        if path != "/api/admin/update":
+            self.send_json(404, {"error": "Not found."})
+            return
+        if not admin_token():
+            self.send_json(503, {"error": "The editor has not been configured on this server."})
+            return
+        if not admin_authorized(self.headers):
+            self.send_json(401, {"error": "Admin authorization is required."})
+            return
+        try:
+            apply_admin_update(self.request_json())
+            self.send_json(200, {"ok": True})
+        except ValueError as exc:
+            self.send_json(400, {"error": str(exc)})
+        except Exception:
+            LOG.exception("Dashboard admin update failed")
+            self.send_json(503, {"error": "The update could not be saved."})
 
 
 def main() -> None:

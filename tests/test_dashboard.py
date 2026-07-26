@@ -12,6 +12,7 @@ class DashboardStateTest(unittest.TestCase):
     def setUp(self):
         self.old_db = dashboard.DB_PATH
         self.old_guild = os.environ.get("TRACKER_GUILD_ID")
+        self.old_admin_token = os.environ.get("TRACKER_ADMIN_TOKEN")
         self.temp = tempfile.TemporaryDirectory()
         dashboard.DB_PATH = Path(self.temp.name) / "tracker.db"
         os.environ["TRACKER_GUILD_ID"] = "42"
@@ -26,6 +27,10 @@ class DashboardStateTest(unittest.TestCase):
             os.environ.pop("TRACKER_GUILD_ID", None)
         else:
             os.environ["TRACKER_GUILD_ID"] = self.old_guild
+        if self.old_admin_token is None:
+            os.environ.pop("TRACKER_ADMIN_TOKEN", None)
+        else:
+            os.environ["TRACKER_ADMIN_TOKEN"] = self.old_admin_token
         self.temp.cleanup()
 
     def test_private_milestones_do_not_leave_the_database(self):
@@ -90,6 +95,60 @@ class DashboardStateTest(unittest.TestCase):
         self.assertIn('function projectCard', dashboard.PAGE)
         self.assertIn('function taskCard', dashboard.PAGE)
         self.assertIn('tree-detail', dashboard.PAGE)
+
+    def test_admin_state_and_live_updates_are_scoped_to_the_tracker_guild(self):
+        project_id = db.create_project(42, "Website", "Old copy", 1)
+        task_id = db.add_task(project_id, "Draft", due_date="2026-08-01", weight=1)
+        milestone_id = db.create_milestone(42, "launch", "Launch", description="Old milestone")
+        db.link_project(milestone_id, project_id)
+        other_project = db.create_project(99, "Other guild", "", 1)
+
+        state = dashboard.admin_state()
+        self.assertEqual(state["projects"][0]["tasks"][0]["id"], task_id)
+        self.assertEqual(state["milestones"][0]["projects"], ["Website"])
+
+        dashboard.apply_admin_update({
+            "kind": "project", "id": project_id, "name": "Website refresh",
+            "description": "New copy", "status": "active", "difficulty": 7,
+            "group": "Product", "region": "Global", "team": "Web",
+        })
+        dashboard.apply_admin_update({
+            "kind": "task", "id": task_id, "title": "Publish", "status": "doing",
+            "assignee_id": "123", "due_date": "2026-08-03", "weight": 4,
+        })
+        dashboard.apply_admin_update({
+            "kind": "milestone", "id": milestone_id, "name": "Launch day",
+            "description": "New milestone", "unlocks": "Public release", "xp": 250,
+            "difficulty": 8, "private": True, "auto_close": False,
+            "group": "Product", "region": "Global", "team": "Web",
+        })
+
+        project = db.get_project(42, "Website refresh")
+        task = db.get_task(42, task_id)
+        milestone = db.get_milestone(42, "launch")
+        self.assertEqual((project["description"], project["difficulty"], project["grp"]),
+                         ("New copy", 7, "Product"))
+        self.assertEqual((task["title"], task["status"], task["assignee_id"], task["weight"]),
+                         ("Publish", "doing", 123, 4))
+        self.assertEqual((milestone["name"], milestone["xp"], milestone["private"], milestone["auto_close"]),
+                         ("Launch day", 250, 1, 0))
+        self.assertIsNotNone(db.get_project(99, "Other guild"))
+        self.assertEqual(other_project, db.get_project(99, "Other guild")["id"])
+
+    def test_admin_updates_reject_invalid_task_status(self):
+        project_id = db.create_project(42, "Website", "", 1)
+        task_id = db.add_task(project_id, "Draft")
+        with self.assertRaisesRegex(ValueError, "Task status"):
+            dashboard.apply_admin_update({
+                "kind": "task", "id": task_id, "title": "Draft", "status": "magic",
+                "assignee_id": "", "due_date": "", "weight": 1,
+            })
+
+    def test_admin_token_must_match_exactly(self):
+        os.environ["TRACKER_ADMIN_TOKEN"] = "right-token-with-enough-length"
+        self.assertTrue(dashboard.admin_authorized({"Authorization": "Bearer right-token-with-enough-length"}))
+        self.assertFalse(dashboard.admin_authorized({"Authorization": "Bearer wrong-token-with-enough-length"}))
+        self.assertFalse(dashboard.admin_authorized({}))
 
 
 if __name__ == "__main__":
