@@ -107,6 +107,7 @@ def project_embed(project, prog, tasks_, log) -> discord.Embed:
               f"{prog['blocked']} blocked · {prog['todo']} not started",
         inline=False,
     )
+    e.add_field(name="Difficulty", value=f"`{'█' * round(project['difficulty'])}{'░' * (10 - round(project['difficulty']))}` {project['difficulty']:g}/10", inline=False)
     if tasks_:
         shown = tasks_[:15]
         body = "\n".join(task_line(t) for t in shown)
@@ -164,8 +165,10 @@ project_group = app_commands.Group(
 
 @project_group.command(name="new", description="Start tracking a new project")
 @app_commands.describe(name="Short unique name", description="What is this project?",
+                       difficulty="1-10, half steps allowed (default 1)",
                        group="Group it belongs to", region="Region", team="Team")
 async def project_new(interaction: discord.Interaction, name: str, description: str = "",
+                      difficulty: app_commands.Range[float, 1.0, 10.0] = 1.0,
                       group: str = "Universal", region: str = "Universal",
                       team: str = "Universal"):
     if db.get_project(interaction.guild_id, name):
@@ -176,7 +179,7 @@ async def project_new(interaction: discord.Interaction, name: str, description: 
     for val in (group, region, team):
         if val.strip().lower() == "universal" and val != "Universal":
             pass
-    pid = db.create_project(interaction.guild_id, name, description, interaction.user.id)
+    pid = db.create_project(interaction.guild_id, name, description, interaction.user.id, difficulty)
     db.set_project_tags(pid, grp=group, region=region, team=team)
     tags = " · ".join(v for v in (group, region, team) if v != "Universal")
     await interaction.response.send_message(
@@ -544,6 +547,7 @@ class Tracker(commands.Bot):
             await self.tree.sync()
         self.digest_loop.start()
         self.board_loop.start()
+        self.stale_loop.start()
 
     async def on_ready(self):
         if not GUILD_ID and not self._command_cleanup_done:
@@ -608,6 +612,28 @@ class Tracker(commands.Bot):
 
     @board_loop.before_loop
     async def before_board(self):
+        await self.wait_until_ready()
+
+    @tasks.loop(minutes=30)
+    async def stale_loop(self):
+        for settings in await asyncio.to_thread(db.all_stale_alert_guilds):
+            channel = self.get_channel(settings["stale_channel"])
+            if not isinstance(channel, discord.TextChannel):
+                continue
+            config, alerts = await asyncio.to_thread(db.claim_stale_project_alerts,
+                                                     settings["guild_id"])
+            for alert in alerts:
+                colour = discord.Color.red() if alert["kind"] == "blocked" else discord.Color.orange()
+                title = "Project blocked" if alert["kind"] == "blocked" else "Project needs attention"
+                embed = discord.Embed(title=f"⚠️ {title}: {alert['name']}",
+                                      description=alert["detail"], colour=colour)
+                await channel.send(
+                    content=mention_line({"role": config["roles"], "user": []}), embed=embed,
+                    allowed_mentions=discord.AllowedMentions(roles=True, users=False, everyone=False),
+                )
+
+    @stale_loop.before_loop
+    async def before_stale_loop(self):
         await self.wait_until_ready()
 
     async def post_board(self, guild: discord.Guild, channel: discord.TextChannel,

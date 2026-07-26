@@ -123,6 +123,25 @@
   </section>
 
   <section>
+    <h2>Stale project alerts</h2>
+    <p class="hint">Ping selected roles once when a project becomes blocked, or has no
+      task activity, status change, or project note for the chosen number of days.
+      The alert resets when work moves again. With Discord Developer Mode on,
+      right-click the destination channel and choose <em>Copy Channel ID</em>.</p>
+    <div class="row" style="grid-template-columns:1fr 120px">
+      <div><label for="stale-channel">Channel ID</label><input id="stale-channel" type="text"
+        placeholder="123456789012345678" oninput="state.stale_alerts.channel=this.value"></div>
+      <div><label for="stale-days">Quiet days</label><input id="stale-days" type="number" min="1" max="90"
+        oninput="state.stale_alerts.days=this.value"></div>
+    </div>
+    <div class="row" style="grid-template-columns:1fr auto">
+      <div><label for="stale-role">Roles to ping</label><select id="stale-role"></select></div>
+      <button onclick="addStaleRole()">Add role</button>
+    </div>
+    <div class="chips" id="stale-roles"></div>
+  </section>
+
+  <section>
     <h2>Groups, regions, teams</h2>
     <p class="hint">The values people can tag work with. Universal is always
       available and isn't listed here.</p>
@@ -156,6 +175,7 @@ let state = {
   signoff_role: null,
   taxonomy: {grp:[],region:[],team:[]},
   levels: [],             // {xp, name, perk}
+  stale_alerts: {channel:"", days:7, roles:[]},
 };
 
 const esc = s => (s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -199,6 +219,13 @@ function render(){
   document.getElementById("signoff").innerHTML = roleOptions(state.signoff_role);
   document.getElementById("signoff").onchange = e => state.signoff_role = e.target.value || null;
 
+  document.getElementById("stale-channel").value = state.stale_alerts.channel || "";
+  document.getElementById("stale-days").value = state.stale_alerts.days || 7;
+  document.getElementById("stale-role").innerHTML = roleOptions("");
+  document.getElementById("stale-roles").innerHTML = state.stale_alerts.roles.map((id,i)=>
+    `<span class="chip">${esc(allRoles()[id] || `role ${id}`)}<button aria-label="Remove stale alert role" onclick="state.stale_alerts.roles.splice(${i},1);render()">✕</button></span>`
+  ).join("") || `<span class="hint">No roles selected — alerts stay off.</span>`;
+
   // taxonomy — one row that adds group + region + team together as a set
   document.getElementById("tax").innerHTML = `
     <div class="row" style="grid-template-columns:1fr 1fr 1fr auto;margin-bottom:12px">
@@ -239,6 +266,12 @@ function render(){
 
 function addPerm(){ state.permissions.push({command:"",role:""}); render(); }
 function addLevel(){ state.levels.push({xp:0,name:"",perk:""}); render(); }
+function addStaleRole(){
+  const id = document.getElementById("stale-role").value;
+  if (!id){ status("Pick a role first."); return; }
+  if (!state.stale_alerts.roles.includes(id)) state.stale_alerts.roles.push(id);
+  render();
+}
 
 function addRole(){
   const name = document.getElementById("new-role-name").value.trim();
@@ -285,6 +318,9 @@ function build(){
       grp: state.taxonomy.grp, region: state.taxonomy.region, team: state.taxonomy.team,
     },
     levels: state.levels.filter(l=>l.name.trim()).map(l=>({xp:l.xp,name:l.name.trim(),perk:l.perk||""})),
+    stale_alerts: {channel:state.stale_alerts.channel||null,
+                   days:Math.max(1,Math.min(90,parseInt(state.stale_alerts.days)||7)),
+                   roles:state.stale_alerts.roles},
   };
 }
 
@@ -311,6 +347,9 @@ function loadDoc(doc){
   state.signoff_role = doc.signoff_role || null;
   for (const k of KINDS) state.taxonomy[k] = (doc.taxonomy?.[k]||[]).slice();
   state.levels = (doc.levels||[]).map(l=>({xp:l.xp,name:l.name,perk:l.perk||""}));
+  const stale = doc.stale_alerts || {};
+  state.stale_alerts = {channel:stale.channel || "", days:stale.days || 7,
+                        roles:(stale.roles || []).map(String)};
   document.getElementById("drop").classList.add("ready");
   document.getElementById("drop").innerHTML =
     `<strong>Loaded.</strong> ${Object.keys(roles).length} roles recognised. Edit below, then download.`;

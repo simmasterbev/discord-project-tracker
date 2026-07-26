@@ -108,11 +108,14 @@ def upsert_project(guild_id: int, spec: dict, owner: int) -> int:
     existing = db.get_project(guild_id, name)
     if existing:
         db.update_project(existing["id"], description=spec.get("description"))
+        if "difficulty" in spec:
+            db.set_project_difficulty(existing["id"], spec["difficulty"])
         if any(key in spec for key in ("grp", "region", "team")):
             db.set_project_tags(existing["id"], grp=spec.get("grp"),
                                 region=spec.get("region"), team=spec.get("team"))
         return existing["id"]
-    pid = db.create_project(guild_id, name, spec.get("description", ""), owner)
+    pid = db.create_project(guild_id, name, spec.get("description", ""), owner,
+                            spec.get("difficulty", 1))
     if any(key in spec for key in ("grp", "region", "team")):
         db.set_project_tags(pid, grp=spec.get("grp"), region=spec.get("region"),
                             team=spec.get("team"))

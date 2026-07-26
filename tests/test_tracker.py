@@ -615,6 +615,12 @@ class TestDifficulty(Base):
         db.set_difficulty(mid, 2)
         self.assertEqual(db.get_milestone(G, "a")["difficulty"], 2.0)
 
+    def test_project_difficulty_round_trips(self):
+        project = db.create_project(G, "Work", "", 1, difficulty=6.5)
+        self.assertEqual(db.get_project(G, "Work")["difficulty"], 6.5)
+        db.set_project_difficulty(project, 4)
+        self.assertEqual(db.get_project(G, "Work")["difficulty"], 4.0)
+
 
 class TestTaxonomy(Base):
     def test_universal_always_listed_first(self):
@@ -823,6 +829,13 @@ class TestConfigRoundTrip(Base):
         got = [(r["threshold"], r["name"]) for r in db.list_levels(G)]
         self.assertEqual(got, [(0, "Start"), (999, "End")])   # Legacy + defaults gone
 
+    def test_stale_alert_config_round_trips_roles_and_threshold(self):
+        doc = {"permissions": {}, "taxonomy": {}, "levels": [],
+               "stale_alerts": {"channel": "555", "days": 12, "roles": ["111"]}}
+        db.apply_config(G, doc, {111})
+        self.assertEqual(db.stale_alert_settings(G), {"channel": 555, "days": 12, "roles": [111]})
+        self.assertIsNone(db.diff_config(G, db.export_config(G), {111})["stale_alerts"])
+
 
 class TestModeratorTools(Base):
     def test_notification_targets_inherit_from_tree_project_and_milestone(self):
@@ -844,6 +857,19 @@ class TestModeratorTools(Base):
         report = db.stuck_report(G, stale_days=7)
         self.assertEqual([item["name"] for item in report["idle"]], ["Idle"])
         self.assertEqual([item["title"] for item in report["blocked"]], ["Waiting on permit"])
+
+    def test_stale_project_alerts_fire_once_then_reset_on_activity(self):
+        project = db.create_project(G, "Quiet", "", 1)
+        db.set_stale_alerts(G, 555, 7, [11])
+        db._exec("UPDATE projects SET last_activity=datetime('now', '-10 days') WHERE id=?", (project,))
+        settings, alerts = db.claim_stale_project_alerts(G)
+        self.assertEqual(settings["roles"], [11])
+        self.assertEqual([(item["name"], item["kind"]) for item in alerts], [("Quiet", "stale")])
+        self.assertEqual(db.claim_stale_project_alerts(G)[1], [])
+        db.touch_project(project)
+        db.claim_stale_project_alerts(G)  # clear the old alert
+        db._exec("UPDATE projects SET last_activity=datetime('now', '-10 days') WHERE id=?", (project,))
+        self.assertEqual(db.claim_stale_project_alerts(G)[1][0]["name"], "Quiet")
 
     def test_board_settings_and_announce_flag_round_trip(self):
         milestone = self.milestone("launch")

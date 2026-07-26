@@ -56,13 +56,17 @@ class DashboardStateTest(unittest.TestCase):
         self.assertNotIn("Private task", dashboard.task_report(state).decode())
 
     def test_reports_include_work_without_discord_user_ids(self):
-        project_id = db.create_project(42, "Website", "Ship the dashboard", 1)
+        project_id = db.create_project(42, "Website", "Ship the dashboard", 1, difficulty=6)
+        db.set_project_tags(project_id, grp="Product", region="North")
         db.add_task(project_id, "Publish it", assignee_id=987654321, due_date="2026-08-01", weight=2)
 
         state = dashboard.public_state()
         task_csv = dashboard.task_report(state).decode()
 
         self.assertEqual(state["tasks"][0]["assigned"], True)
+        self.assertEqual(state["projects"][0]["difficulty"], 6.0)
+        self.assertEqual(state["projects"][0]["group"], "Product")
+        self.assertIn("Product", state["filters"]["groups"])
         self.assertNotIn("assignee_id", json.dumps(state))
         self.assertIn("Website,Publish it,todo,2026-08-01,2,yes", task_csv)
 

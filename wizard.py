@@ -543,13 +543,19 @@ def config_diff_embed(rep: dict, role_name: dict) -> discord.Embed:
     block("Groups/regions/teams removed", [f"{k}: {v}" for k, v in rep["tax_remove"]])
     block("Levels set", [f"{xp} XP — {nm}" for xp, nm in rep["level_set"]])
     block("Levels removed", [f"{xp} XP — {nm}" for xp, nm in rep["level_remove"]])
+    if rep.get("stale_alerts"):
+        stale = rep["stale_alerts"]
+        roles = ", ".join(rn(role) for role in stale["roles"]) or "no roles (disabled)"
+        e.add_field(name="Stale project alerts",
+                    value=f"Channel: {stale['channel'] or 'off'} · after {stale['days']} days · {roles}",
+                    inline=False)
     if rep["skipped"]:
         block("⏭️ Skipped (role no longer exists)",
               [f"{what}: {val}" for what, val in rep["skipped"]])
 
     if not any(rep[k] for k in ("perm_set", "perm_change", "perm_remove", "tax_add",
                                 "tax_remove", "level_set", "level_remove")) \
-            and not rep["universal"] and not rep["signoff"]:
+            and not rep["universal"] and not rep["signoff"] and not rep.get("stale_alerts"):
         e.description = "Nothing would change — the file matches the current config."
     return e
 

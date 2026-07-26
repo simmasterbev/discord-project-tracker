@@ -303,7 +303,7 @@ function toggleReq(i,name){
   render();
 }
 function addProject(){
-  projects.push({name:"", desc:"", grp:"Universal", region:"Universal", team:"Universal", tasks:[]});
+  projects.push({name:"", desc:"", difficulty:1, grp:"Universal", region:"Universal", team:"Universal", tasks:[]});
   render();
   setTimeout(()=>document.querySelector(`#p${projects.length-1}-name`)?.focus(), 0);
 }
@@ -453,6 +453,9 @@ function render(){
         placeholder="Venue work" oninput="setProject(${i},'name',this.value)"></div>
       <div class="field"><label>What is this project for?</label><textarea aria-label="Project ${i+1} description" placeholder="Book and prepare the venue"
         oninput="setProject(${i},'desc',this.value)">${esc(p.desc)}</textarea></div>
+      <div class="field"><label>Difficulty (1–10)</label><input type="number" min="1" max="10" step="0.5"
+        aria-label="Project ${i+1} difficulty" value="${p.difficulty ?? 1}"
+        oninput="setProject(${i},'difficulty',this.value)"></div>
       <div class="row3">
         <div class="field"><label>Group</label><select onchange="setProject(${i},'grp',this.value)">${taxOptions('grp',p.grp||'Universal')}</select></div>
         <div class="field"><label>Region</label><select onchange="setProject(${i},'region',this.value)">${taxOptions('region',p.region||'Universal')}</select></div>
@@ -531,7 +534,7 @@ function jsonPlan(){
   return {
     projects: projects.filter(p=>p.name.trim()).map(p=>({
       name:p.name.trim(), description:p.desc||"", grp:p.grp||"Universal",
-      region:p.region||"Universal", team:p.team||"Universal",
+      region:p.region||"Universal", team:p.team||"Universal", difficulty:Number(p.difficulty)||1,
       tasks:p.tasks.filter(t=>t.title.trim()).map(t=>({
         title:t.title.trim(), weight:Number(t.weight)||1, due:t.due||"", assignee:t.assignee||"",
       })),

@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS projects (
     grp         TEXT    NOT NULL DEFAULT 'Universal',
     region      TEXT    NOT NULL DEFAULT 'Universal',
     team        TEXT    NOT NULL DEFAULT 'Universal',
+    difficulty  REAL    NOT NULL DEFAULT 1,
+    last_activity TEXT,
     UNIQUE (guild_id, name)
 );
 
@@ -67,7 +69,9 @@ CREATE TABLE IF NOT EXISTS settings (
     board_weekday  INTEGER NOT NULL DEFAULT 0,
     board_hour     INTEGER NOT NULL DEFAULT 9,
     board_tree     TEXT,                          -- which tree, or all if null
-    last_board     TEXT
+    last_board     TEXT,
+    stale_channel  INTEGER,
+    stale_days     INTEGER NOT NULL DEFAULT 7
 );
 
 -- ---- tech tree --------------------------------------------------------
@@ -115,6 +119,13 @@ CREATE TABLE IF NOT EXISTS notify_targets (
     target_kind TEXT    NOT NULL,
     target_id   INTEGER NOT NULL,
     PRIMARY KEY (guild_id, scope, scope_id, target_kind, target_id)
+);
+
+CREATE TABLE IF NOT EXISTS project_alerts (
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    kind       TEXT    NOT NULL, -- stale | blocked
+    sent_at    TEXT    NOT NULL,
+    PRIMARY KEY (project_id, kind)
 );
 
 CREATE TABLE IF NOT EXISTS credit (
@@ -213,6 +224,8 @@ MIGRATIONS = [
     ("projects", "grp", "TEXT NOT NULL DEFAULT 'Universal'"),
     ("projects", "region", "TEXT NOT NULL DEFAULT 'Universal'"),
     ("projects", "team", "TEXT NOT NULL DEFAULT 'Universal'"),
+    ("projects", "difficulty", "REAL NOT NULL DEFAULT 1"),
+    ("projects", "last_activity", "TEXT"),
     ("trees", "grp", "TEXT NOT NULL DEFAULT 'Universal'"),
     ("trees", "region", "TEXT NOT NULL DEFAULT 'Universal'"),
     ("trees", "team", "TEXT NOT NULL DEFAULT 'Universal'"),
@@ -229,6 +242,8 @@ MIGRATIONS = [
     ("settings", "board_hour", "INTEGER NOT NULL DEFAULT 9"),
     ("settings", "board_tree", "TEXT"),
     ("settings", "last_board", "TEXT"),
+    ("settings", "stale_channel", "INTEGER"),
+    ("settings", "stale_days", "INTEGER NOT NULL DEFAULT 7"),
 ]
 
 # the three taxonomy dimensions share one shape
@@ -284,11 +299,13 @@ def _exec(sql: str, args: tuple = ()) -> sqlite3.Cursor:
 # projects
 # --------------------------------------------------------------------------
 
-def create_project(guild_id: int, name: str, description: str, owner_id: int) -> int:
+def create_project(guild_id: int, name: str, description: str, owner_id: int,
+                   difficulty: float = 1.0) -> int:
+    created = now()
     cur = _exec(
-        "INSERT INTO projects (guild_id, name, description, owner_id, created_at) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (guild_id, name, description, owner_id, now()),
+        "INSERT INTO projects (guild_id, name, description, owner_id, created_at, last_activity, difficulty) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (guild_id, name, description, owner_id, created, created, clamp_difficulty(difficulty)),
     )
     return cur.lastrowid
 
@@ -315,6 +332,20 @@ def set_project_status(project_id: int, status: str) -> None:
 
 def rename_project(project_id: int, name: str) -> None:
     _exec("UPDATE projects SET name = ? WHERE id = ?", (name, project_id))
+
+
+def set_project_difficulty(project_id: int, value: float) -> None:
+    _exec("UPDATE projects SET difficulty = ? WHERE id = ?",
+          (clamp_difficulty(value), project_id))
+
+
+def touch_project(project_id: int) -> None:
+    _exec("UPDATE projects SET last_activity = ? WHERE id = ?", (now(), project_id))
+
+
+def touch_task_project(task_id: int) -> None:
+    _exec("UPDATE projects SET last_activity = ? WHERE id = "
+          "(SELECT project_id FROM tasks WHERE id = ?)", (now(), task_id))
 
 
 def delete_project(project_id: int) -> None:
@@ -362,6 +393,7 @@ def add_task(
         "VALUES (?, ?, ?, ?, ?, ?)",
         (project_id, title, assignee_id, due_date, weight, now()),
     )
+    touch_project(project_id)
     return cur.lastrowid
 
 
@@ -402,10 +434,12 @@ def set_task_status(task_id: int, status: str) -> None:
         "UPDATE tasks SET status = ?, completed_at = ? WHERE id = ?",
         (status, completed, task_id),
     )
+    touch_task_project(task_id)
 
 
 def assign_task(task_id: int, assignee_id: Optional[int]) -> None:
     _exec("UPDATE tasks SET assignee_id = ? WHERE id = ?", (assignee_id, task_id))
+    touch_task_project(task_id)
 
 
 def update_task_details(task_id: int, assignee_id: Optional[int], due_date: Optional[str],
@@ -415,10 +449,14 @@ def update_task_details(task_id: int, assignee_id: Optional[int], due_date: Opti
         "UPDATE tasks SET assignee_id = ?, due_date = ?, weight = ? WHERE id = ?",
         (assignee_id, due_date, weight, task_id),
     )
+    touch_task_project(task_id)
 
 
 def delete_task(task_id: int) -> None:
+    rows = _q("SELECT project_id FROM tasks WHERE id = ?", (task_id,))
     _exec("DELETE FROM tasks WHERE id = ?", (task_id,))
+    if rows:
+        touch_project(rows[0]["project_id"])
 
 
 def my_tasks(guild_id: int, user_id: int) -> list[sqlite3.Row]:
@@ -452,6 +490,7 @@ def add_log(project_id: int, author_id: int, body: str) -> None:
         "INSERT INTO log (project_id, author_id, body, created_at) VALUES (?, ?, ?, ?)",
         (project_id, author_id, body, now()),
     )
+    touch_project(project_id)
 
 
 def recent_log(project_id: int, limit: int = 5) -> list[sqlite3.Row]:
@@ -1455,6 +1494,7 @@ def export_config(guild_id: int) -> dict:
           for r in list_levels(guild_id)]
     uni = get_universal_role(guild_id)
     sign = get_signoff_role(guild_id)
+    stale = stale_alert_settings(guild_id)
     return {
         "version": 1,
         "permissions": perms,
@@ -1462,6 +1502,8 @@ def export_config(guild_id: int) -> dict:
         "signoff_role": str(sign) if sign else None,
         "taxonomy": tax,
         "levels": lv,
+        "stale_alerts": {"channel": str(stale["channel"]) if stale["channel"] else None,
+                         "days": stale["days"], "roles": [str(r) for r in stale["roles"]]},
     }
 
 
@@ -1480,7 +1522,7 @@ def diff_config(guild_id: int, doc: dict, valid_role_ids: set[int]) -> dict:
     report = {"perm_set": [], "perm_change": [], "perm_remove": [],
               "skipped": [], "tax_add": [], "tax_remove": [],
               "level_set": [], "level_remove": [],
-              "universal": None, "signoff": None, "lockout": False}
+              "universal": None, "signoff": None, "stale_alerts": None, "lockout": False}
 
     # --- permissions (replace) ---
     current = {r["command"]: r["role_id"] for r in list_cmd_perms(guild_id)}
@@ -1534,6 +1576,21 @@ def diff_config(guild_id: int, doc: dict, valid_role_ids: set[int]) -> dict:
     for xp in cur_levels:
         if xp not in want_levels:
             report["level_remove"].append((xp, cur_levels[xp][0]))
+
+    # --- stale-project alert settings ---
+    raw_stale = doc.get("stale_alerts", {}) or {}
+    channel = rid(raw_stale.get("channel"))
+    try:
+        days = max(1, min(90, int(raw_stale.get("days", 7))))
+    except (TypeError, ValueError):
+        days = 7
+    roles = sorted({r for value in raw_stale.get("roles", []) or []
+                    if (r := rid(value)) in valid_role_ids})
+    skipped_roles = [value for value in raw_stale.get("roles", []) or [] if rid(value) not in valid_role_ids]
+    report["skipped"].extend(("stale_alert_role", str(value)) for value in skipped_roles)
+    wanted_stale = {"channel": channel, "days": days, "roles": roles}
+    if wanted_stale != stale_alert_settings(guild_id):
+        report["stale_alerts"] = wanted_stale
 
     # --- lockout guard: would config_import end up with a valid gate AND a
     #     Manage-Server fallback? Manage Server always passes, so the only true
@@ -1592,12 +1649,22 @@ def apply_config(guild_id: int, doc: dict, valid_role_ids: set[int]) -> None:
         except (KeyError, ValueError, TypeError):
             continue
 
+    raw_stale = doc.get("stale_alerts", {}) or {}
+    try:
+        days = int(raw_stale.get("days", 7))
+    except (TypeError, ValueError):
+        days = 7
+    channel = rid(raw_stale.get("channel"))
+    roles = [r for value in raw_stale.get("roles", []) or []
+             if (r := rid(value)) in valid_role_ids]
+    set_stale_alerts(guild_id, channel, days, roles)
+
 
 # --------------------------------------------------------------------------
 # moderator reporting and notifications
 # --------------------------------------------------------------------------
 
-NOTIFY_SCOPES = ("project", "tree", "milestone")
+NOTIFY_SCOPES = ("server", "project", "tree", "milestone")
 
 
 def milestone_assignees(milestone_id: int) -> list[int]:
@@ -1646,6 +1713,73 @@ def effective_notify(guild_id: int, milestone_id: int) -> dict[str, list[int]]:
             for target in list_notify(guild_id, scope, sid):
                 targets[target["target_kind"]].add(target["target_id"])
     return {kind: sorted(ids) for kind, ids in targets.items()}
+
+
+def stale_alert_settings(guild_id: int) -> dict:
+    settings = get_settings(guild_id)
+    roles = [r["target_id"] for r in list_notify(guild_id, "server", guild_id)
+             if r["target_kind"] == "role"]
+    return {"channel": settings["stale_channel"], "days": settings["stale_days"],
+            "roles": sorted(roles)}
+
+
+def set_stale_alerts(guild_id: int, channel_id: Optional[int], days: int,
+                     role_ids: list[int]) -> None:
+    get_settings(guild_id)
+    _exec("UPDATE settings SET stale_channel=?, stale_days=? WHERE guild_id=?",
+          (channel_id, max(1, min(90, int(days))), guild_id))
+    _exec("DELETE FROM notify_targets WHERE guild_id=? AND scope='server' AND scope_id=?",
+          (guild_id, guild_id))
+    for role_id in set(role_ids):
+        add_notify(guild_id, "server", guild_id, "role", role_id)
+
+
+def all_stale_alert_guilds() -> list[sqlite3.Row]:
+    return _q("SELECT * FROM settings WHERE stale_channel IS NOT NULL")
+
+
+def stale_projects(guild_id: int, stale_days: int) -> list[dict]:
+    """Projects that are blocked or have had no recorded activity recently."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=stale_days)).isoformat()
+    out = []
+    for project in list_projects(guild_id):
+        blocked = _q("SELECT COUNT(*) AS n FROM tasks WHERE project_id=? AND status='blocked'",
+                     (project["id"],))[0]["n"]
+        if blocked:
+            out.append({"id": project["id"], "name": project["name"], "kind": "blocked",
+                        "detail": f"{blocked} blocked task(s)"})
+            continue
+        activity = project["last_activity"] or project["created_at"]
+        if activity and activity < cutoff:
+            out.append({"id": project["id"], "name": project["name"], "kind": "stale",
+                        "detail": f"no activity for {stale_days}+ days"})
+    return out
+
+
+def claim_stale_project_alerts(guild_id: int) -> tuple[dict, list[dict]]:
+    """Return newly-stale projects once; activity or unblocking resets the alert."""
+    settings = stale_alert_settings(guild_id)
+    if not settings["channel"] or not settings["roles"]:
+        return settings, []
+    current = stale_projects(guild_id, settings["days"])
+    wanted = {(item["id"], item["kind"]) for item in current}
+    with _lock:
+        c = conn()
+        existing = c.execute(
+            "SELECT a.project_id, a.kind FROM project_alerts a JOIN projects p ON p.id=a.project_id "
+            "WHERE p.guild_id=?", (guild_id,)).fetchall()
+        for row in existing:
+            if (row["project_id"], row["kind"]) not in wanted:
+                c.execute("DELETE FROM project_alerts WHERE project_id=? AND kind=?",
+                          (row["project_id"], row["kind"]))
+        fresh = []
+        for item in current:
+            cur = c.execute("INSERT OR IGNORE INTO project_alerts (project_id, kind, sent_at) "
+                            "VALUES (?, ?, ?)", (item["id"], item["kind"], now()))
+            if cur.rowcount:
+                fresh.append(item)
+        c.commit()
+    return settings, fresh
 
 
 def stuck_report(guild_id: int, stale_days: int = 7) -> dict:
@@ -1773,5 +1907,6 @@ def export_for_planner(guild_id: int) -> dict:
         "group": project["grp"],
         "region": project["region"],
         "team": project["team"],
+        "difficulty": project["difficulty"],
     } for project in list_projects(guild_id)]
     return {"_kind": "planner_server_export", "trees": trees, "projects": projects}
