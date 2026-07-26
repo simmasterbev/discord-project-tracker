@@ -122,6 +122,23 @@
       <p class="hint" id="tax-status" style="margin:6px 0 0">Milestones inherit the
         tree's tags; change them per-milestone below if needed.</p>
     </div>
+    <div class="field" style="background:var(--surface);border:1px solid var(--line);
+         border-radius:9px;padding:12px 14px">
+      <label>Extend the live server <span style="text-transform:none;letter-spacing:0">(optional)</span></label>
+      <p class="hint" style="margin:2px 0 8px">Run <code>/tree export</code> in Discord,
+        then load the downloaded file here. You can add milestones to an existing tree
+        or link new milestones to an existing project.
+        <label for="serverfile" style="display:inline;text-transform:none;letter-spacing:0;
+          color:var(--ready);cursor:pointer;font-family:var(--sans)">load server-trees.json</label>
+        <input type="file" id="serverfile" accept=".json" style="display:none"></p>
+      <p class="hint" id="server-status" style="margin:0">Nothing loaded — building a new tree.</p>
+      <div class="field" id="target-tree-wrap" style="display:none;margin:10px 0 0">
+        <label for="target-tree">Add to an existing tree</label>
+        <select id="target-tree" onchange="pickExistingTree(this.value)"></select>
+        <p class="hint" style="margin:4px 0 0">Existing milestones appear as reference
+          prerequisites. They stay unchanged in Discord.</p>
+      </div>
+    </div>
     <div id="editor"></div>
     <button onclick="addNode()">+ Add milestone</button>
     <h2 class="section-title">Projects and tasks <span style="text-transform:none;letter-spacing:0">(optional)</span></h2>
@@ -155,6 +172,9 @@ let nodes = [
    unlocks:"promotion can start", req:["Venue booked"], xp:250, auto:true}
 ];
 let projects = [];
+// Read-only reference data loaded from /tree export.
+let server = {trees: [], projects: []};
+let targetTreeKey = null;
 
 const esc = s => (s||"").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
@@ -196,6 +216,57 @@ function loadTaxonomy(doc){
     + `Milestones inherit the tree's tags unless you override them.`;
   render();
 }
+
+function loadServer(doc){
+  if (doc._kind !== "planner_server_export"){
+    document.getElementById("server-status").textContent =
+      "That doesn't look like a /tree export file.";
+    return;
+  }
+  server = {trees: doc.trees || [], projects: doc.projects || []};
+  document.getElementById("server-status").textContent =
+    `Loaded ${server.trees.length} tree(s) and ${server.projects.length} project(s).`;
+  const wrap = document.getElementById("target-tree-wrap");
+  const select = document.getElementById("target-tree");
+  if (server.trees.length){
+    wrap.style.display = "";
+    select.innerHTML = `<option value="">— new tree —</option>` +
+      server.trees.map(t => `<option value="${esc(t.key)}">${esc(t.name)} ` +
+        `(${(t.milestones || []).length} milestones)</option>`).join("");
+  } else {
+    wrap.style.display = "none";
+  }
+  render();
+}
+
+function pickExistingTree(key){
+  targetTreeKey = key || null;
+  const tree = server.trees.find(t => t.key === key);
+  if (tree){
+    document.getElementById("treename").value = tree.name;
+    treeScope.grp = tree.group || "Universal";
+    treeScope.region = tree.region || "Universal";
+    treeScope.team = tree.team || "Universal";
+    fillTreeScopeMenus();
+  }
+  render();
+}
+
+function existingMilestones(){
+  const tree = server.trees.find(t => t.key === targetTreeKey);
+  return tree ? (tree.milestones || []) : [];
+}
+
+document.getElementById("serverfile").addEventListener("change", e => {
+  const file = e.target.files[0]; if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try { loadServer(JSON.parse(reader.result)); }
+    catch { document.getElementById("server-status").textContent =
+      "That file isn't valid JSON."; }
+  };
+  reader.readAsText(file);
+});
 
 document.getElementById("taxfile").addEventListener("change", e=>{
   const f = e.target.files[0]; if(!f) return;
@@ -280,13 +351,24 @@ function tiers(){
 function render(){
   document.getElementById("editor").innerHTML = nodes.map((n,i)=>{
     const others = nodes.filter((_,j)=>j!==i).map(o=>o.name).filter(Boolean);
-    const chips = others.length
-      ? others.map(o=>`<button type="button" class="chip" aria-pressed="${n.req.includes(o)}"
-           onclick="toggleReq(${i},'${esc(o).replace(/'/g,"\\'")}')">${esc(o)}</button>`).join("")
-      : `<span class="empty">Add another milestone first</span>`;
-    const projectChips = projects.filter(p=>p.name.trim()).length
-      ? projects.filter(p=>p.name.trim()).map(p=>`<button type="button" class="chip" aria-pressed="${(n.projects||[]).includes(p.name)}"
-           onclick="toggleProject(${i},'${esc(p.name).replace(/'/g,"\\'")}')">${esc(p.name)}</button>`).join("")
+    const serverMilestones = existingMilestones();
+    const prereqChips = others.map(o=>`<button type="button" class="chip" aria-pressed="${n.req.includes(o)}"
+           onclick="toggleReq(${i},'${esc(o).replace(/'/g,"\\'")}')">${esc(o)}</button>`).join("");
+    const serverPrereqChips = serverMilestones.map(m=>`<button type="button" class="chip"
+           style="opacity:.75;border-style:dashed" aria-pressed="${n.req.includes(m.name)}"
+           title="Already on the server"
+           onclick="toggleReq(${i},'${esc(m.name).replace(/'/g,"\\'")}')">${esc(m.name)} ·srv</button>`).join("");
+    const chips = prereqChips + serverPrereqChips ||
+      `<span class="empty">Add another milestone first</span>`;
+    const localProjects = projects.filter(p=>p.name.trim());
+    const remoteProjects = server.projects.filter(p =>
+      p.name && !localProjects.some(local => local.name === p.name));
+    const allProjects = localProjects.concat(remoteProjects);
+    const projectChips = allProjects.length
+      ? allProjects.map(p=>`<button type="button" class="chip" ${remoteProjects.includes(p)?'style="opacity:.75;border-style:dashed"':''}
+           aria-pressed="${(n.projects||[]).includes(p.name)}"
+           title="${remoteProjects.includes(p)?'Already on the server':''}"
+           onclick="toggleProject(${i},'${esc(p.name).replace(/'/g,"\\'")}')">${esc(p.name)}${remoteProjects.includes(p)?" ·srv":""}</button>`).join("")
       : `<span class="empty">Add a project below first</span>`;
     return `<div class="card">
       <h3>Milestone ${i+1}<button class="ghost" onclick="removeNode(${i})">Remove</button></h3>
@@ -416,7 +498,10 @@ function slug(text, fallback){
 
 function jsonPlan(){
   const tree = document.getElementById("treename").value.trim() || "Untitled tree";
-  const projectNames = new Set(projects.map(p=>p.name.trim()).filter(Boolean));
+  const projectNames = new Set([
+    ...projects.map(p=>p.name.trim()).filter(Boolean),
+    ...server.projects.map(p=>p.name).filter(Boolean),
+  ]);
   const used = new Set();
   const milestones = nodes.filter(n=>n.name.trim()).map((n,i)=>{
     let key = slug(n.name, `milestone-${i+1}`), suffix = 2;
@@ -440,12 +525,15 @@ function jsonPlan(){
         title:t.title.trim(), weight:Number(t.weight)||1, due:t.due||"", assignee:t.assignee||"",
       })),
     })),
-    trees: [{key:slug(tree,"tree"), name:tree, grp:treeScope.grp, region:treeScope.region,
+    trees: [{key:targetTreeKey || slug(tree,"tree"), name:tree, grp:treeScope.grp, region:treeScope.region,
              team:treeScope.team, milestones}],
   };
 }
 
-function usesProjects(){ return projects.some(p=>p.name.trim()); }
+function usesProjects(){
+  return projects.some(p=>p.name.trim()) || !!targetTreeKey ||
+    nodes.some(n=>(n.projects||[]).length);
+}
 
 function download(){
   const name = (document.getElementById("treename").value.trim() || "tree")

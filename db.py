@@ -1694,3 +1694,40 @@ def announce_fired(guild_id: int) -> Optional[sqlite3.Row]:
         hit = _q("SELECT 1 FROM milestones WHERE guild_id=? AND announce_on_close=1 "
                  "AND completed_at IS NOT NULL LIMIT 1", (guild_id,))
     return board if hit else None
+
+
+# --------------------------------------------------------------------------
+# planner reference export
+# --------------------------------------------------------------------------
+
+def export_for_planner(guild_id: int) -> dict:
+    """Return read-only tree/project reference data for the offline planner.
+
+    This is deliberately not an import document: it contains the live keys and
+    names the planner needs when extending an existing tree or linking a new
+    milestone to an existing project.
+    """
+    trees = []
+    for tree in list_trees(guild_id):
+        members = _q(
+            "SELECT m.key, m.name FROM tree_members tm "
+            "JOIN milestones m ON m.id = tm.milestone_id "
+            "WHERE tm.tree_id = ? ORDER BY m.name COLLATE NOCASE",
+            (tree["id"],),
+        )
+        trees.append({
+            "key": tree["key"],
+            "name": tree["name"],
+            "group": tree["grp"],
+            "region": tree["region"],
+            "team": tree["team"],
+            "milestones": [{"key": row["key"], "name": row["name"]}
+                           for row in members],
+        })
+    projects = [{
+        "name": project["name"],
+        "group": project["grp"],
+        "region": project["region"],
+        "team": project["team"],
+    } for project in list_projects(guild_id)]
+    return {"_kind": "planner_server_export", "trees": trees, "projects": projects}

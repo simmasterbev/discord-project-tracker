@@ -6,6 +6,7 @@ Covers the parts where a wrong answer is silent: state derivation, XP settling,
 cycle refusal, and the bulk queries agreeing with the per-milestone ones.
 """
 
+import json
 import sqlite3
 import sys
 import unittest
@@ -337,6 +338,82 @@ class TestImport(Base):
         m = db.get_milestone(G, "plain")
         self.assertEqual(m["grp"], "Universal")
         self.assertEqual(m["difficulty"], 1.0)
+
+
+class TestPlannerServerExport(Base):
+    def test_export_shape(self):
+        project = db.create_project(G, "Forum", "", 1)
+        db.set_project_tags(project, grp="Events")
+        tree = db.create_tree(G, "ft", "Forum tree")
+        db.set_tree_tags(tree, grp="Events")
+        milestone = db.create_milestone(G, "venue", "Venue booked")
+        db.add_to_tree(tree, milestone)
+
+        doc = db.export_for_planner(G)
+
+        self.assertEqual(doc["_kind"], "planner_server_export")
+        self.assertEqual(doc["trees"][0]["key"], "ft")
+        self.assertEqual(doc["trees"][0]["group"], "Events")
+        self.assertEqual(
+            doc["trees"][0]["milestones"],
+            [{"key": "venue", "name": "Venue booked"}],
+        )
+        self.assertEqual(doc["projects"][0]["name"], "Forum")
+        self.assertEqual(doc["projects"][0]["group"], "Events")
+
+    def test_export_reflects_only_real_data(self):
+        before = len(db.export_for_planner(G)["trees"])
+        db.create_tree(G, "extra", "Extra tree")
+        after = db.export_for_planner(G)["trees"]
+        self.assertEqual(len(after), before + 1)
+        self.assertTrue(any(tree["key"] == "extra" for tree in after))
+
+
+class TestPlannerExtendExisting(Base):
+    def test_json_plan_can_extend_existing_tree(self):
+        tree = db.create_tree(G, "forum", "Forum")
+        venue = db.create_milestone(G, "venue", "Venue", xp=150)
+        db.add_to_tree(tree, venue)
+        before = len(db.list_trees(G))
+
+        plan = {
+            "trees": [{
+                "key": "forum",
+                "name": "Forum",
+                "milestones": [{
+                    "key": "promo",
+                    "name": "Promo",
+                    "requires": ["Venue"],
+                }],
+            }],
+        }
+        seed.apply_doc(seed.parse(json.dumps(plan), "p.json"), G, 1)
+
+        self.assertEqual(len(db.list_trees(G)), before)
+        keys = db.tree_members(tree)
+        self.assertEqual(keys, {"venue", "promo"})
+
+    def test_json_plan_can_link_existing_project(self):
+        db.create_project(G, "Forum", "", 1)
+        tree = db.create_tree(G, "forum", "Forum")
+        plan = {
+            "trees": [{
+                "key": "forum",
+                "name": "Forum",
+                "milestones": [{
+                    "key": "venue",
+                    "name": "Venue",
+                    "projects": ["Forum"],
+                }],
+            }],
+        }
+        seed.apply_doc(seed.parse(json.dumps(plan), "p.json"), G, 1)
+
+        milestone = db.get_milestone(G, "venue")
+        self.assertEqual(
+            [row["name"] for row in db.milestone_projects(milestone["id"])],
+            ["Forum"],
+        )
 
     def test_json_plan_creates_project_tasks_tags_and_milestone_link(self):
         text = '''{

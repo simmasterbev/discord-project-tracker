@@ -1116,6 +1116,25 @@ async def tree_note(interaction: discord.Interaction, key: str, note: str):
         f"📝 Logged on **{m['name']}**:\n{line}")
 
 
+@tree_group.command(
+    name="export",
+    description="Download trees and projects so the planner can extend them",
+)
+async def tree_export(interaction: discord.Interaction):
+    import io
+    import json
+
+    doc = await asyncio.to_thread(db.export_for_planner, interaction.guild_id)
+    buf = io.BytesIO(json.dumps(doc, indent=2).encode())
+    await interaction.response.send_message(
+        "Here's a snapshot of your trees and projects. Load it in `planner.html` "
+        "to add milestones to an existing tree, or link new milestones to an "
+        "existing project — then `/tree import` the plan you build.",
+        file=discord.File(buf, filename="server-trees.json"),
+        ephemeral=True,
+    )
+
+
 @tree_group.command(name="list", description="Every tree and how far along it is")
 async def tree_list(interaction: discord.Interaction):
     await interaction.response.defer()

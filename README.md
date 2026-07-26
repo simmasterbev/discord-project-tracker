@@ -93,6 +93,7 @@ about six. They're grouped by noun.
 | `/config export` | Download server settings for the offline settings editor |
 | `/config import file` | Preview and apply an edited settings export |
 | `/tree import file` | Preview and apply a CSV, YAML, or JSON plan from the offline planner |
+| `/tree export` | Download live tree/project names for extending them in the offline planner |
 | `/stuck [days] [export]` | Manager-only report of idle, stalled, and blocked work |
 | `/next [tree]` | What's ready to work on right now |
 | `/tree show [tree] [orientation]` | Draw the tree as an image |
@@ -282,6 +283,10 @@ and milestone→project links. Load either one with `/tree import`. An assignee 
 their Discord user ID (enable Developer Mode, right-click the person, **Copy User
 ID**) or leave it blank to assign them later in Discord. The planner can load a
 `config.json` from the config panel so its group/region/team menus match the server.
+Run `/tree export` in Discord and load the downloaded `server-trees.json` when you
+want to add milestones to an existing tree or link new milestones to an existing
+project. Existing server data is shown as read-only reference data; importing the
+plan only adds or updates the plan you build.
 
 **`config_panel.html`** — leadership tool for setting permissions, taxonomy,
 sign-off, universal-role, and levels in bulk. Run `/config export` to download a
