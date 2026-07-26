@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -40,6 +41,17 @@ class DashboardStateTest(unittest.TestCase):
 
         self.assertEqual([node["key"] for node in state["milestones"]], ["public"])
         self.assertEqual(state["trees"][0]["members"], ["public"])
+
+    def test_reports_include_work_without_discord_user_ids(self):
+        project_id = db.create_project(42, "Website", "Ship the dashboard", 1)
+        db.add_task(project_id, "Publish it", assignee_id=987654321, due_date="2026-08-01", weight=2)
+
+        state = dashboard.public_state()
+        task_csv = dashboard.task_report(state).decode()
+
+        self.assertEqual(state["tasks"][0]["assigned"], True)
+        self.assertNotIn("assignee_id", json.dumps(state))
+        self.assertIn("Website,Publish it,todo,2026-08-01,2,yes", task_csv)
 
 
 if __name__ == "__main__":
