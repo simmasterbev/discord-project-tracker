@@ -534,6 +534,7 @@ class Tracker(commands.Bot):
         self.tree.add_command(tree_group)
         self.tree.add_command(config_group)
         self.tree.add_command(test_group)
+        add_configured_permission_checks(self.tree)
         if GUILD_ID:                      # instant, scoped to one server
             guild = discord.Object(id=int(GUILD_ID))
             self.tree.copy_global_to(guild=guild)
@@ -683,7 +684,7 @@ async def on_app_command_error(interaction: discord.Interaction, error: Exceptio
                           interaction.command.qualified_name if interaction.command else "?",
                           exc_info=inner)
         msg = (f"Something went wrong running that — `{type(inner).__name__}`. "
-               f"It's been logged; `journalctl -u tracker -n 50` has the detail.")
+               f"It's been logged; `journalctl -u tracker-bot -n 50` has the detail.")
     try:
         if interaction.response.is_done():
             await interaction.followup.send(msg, ephemeral=True)
@@ -887,6 +888,25 @@ async def deny(interaction: discord.Interaction, command: str) -> None:
         await interaction.followup.send(msg, ephemeral=True)
     else:
         await interaction.response.send_message(msg, ephemeral=True)
+
+
+async def configured_command_permission(interaction: discord.Interaction) -> bool:
+    """Apply /config permission rules to every slash-command leaf."""
+    command = interaction.command
+    if command is None:
+        return True
+    key = command.qualified_name.replace(" ", "_")
+    if may_run(interaction, key):
+        return True
+    await deny(interaction, key)
+    return False
+
+
+def add_configured_permission_checks(tree: app_commands.CommandTree) -> None:
+    """Attach one shared gate instead of relying on each new handler to remember it."""
+    for command in tree.walk_commands():
+        if isinstance(command, app_commands.Command) and configured_command_permission not in command.checks:
+            command.add_check(configured_command_permission)
 
 
 def may_set_universal(interaction: discord.Interaction) -> bool:

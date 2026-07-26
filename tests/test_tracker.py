@@ -6,15 +6,19 @@ Covers the parts where a wrong answer is silent: state derivation, XP settling,
 cycle refusal, and the bulk queries agreeing with the per-milestone ones.
 """
 
+import asyncio
 import json
 import sqlite3
 import sys
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import db          # noqa: E402
+import bot as tracker_bot  # noqa: E402
 import seed        # noqa: E402
 import tree_render  # noqa: E402
 
@@ -116,6 +120,13 @@ class TestXP(Base):
         mid = self.milestone("a", xp=75)
         db.complete_milestone(mid, user_id=42)
         self.assertEqual(db.settle_milestone(G, mid, 75), {42: 75})
+
+    def test_concurrent_settlement_mints_once(self):
+        mid = self.milestone("a", xp=60, tasks=[("x", 1, 5, "done")])
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            awards = list(pool.map(lambda _: db.settle_milestone(G, mid, 60), range(2)))
+        self.assertEqual(sum(bool(result) for result in awards), 1)
+        self.assertEqual(db.user_xp(G, 5), 60)
 
 
 class TestCycles(Base):
@@ -251,6 +262,12 @@ class TestLevels(Base):
 
 
 class TestMigrations(unittest.TestCase):
+    def test_reconnect_closes_the_old_connection(self):
+        first = db.connect(":memory:")
+        db.connect(":memory:")
+        with self.assertRaises(sqlite3.ProgrammingError):
+            first.execute("SELECT 1")
+
     def test_old_database_gains_columns_without_losing_rows(self):
         path = "test_migration.db"
         Path(path).unlink(missing_ok=True)
@@ -441,6 +458,45 @@ class TestPlannerExtendExisting(Base):
                          ("Get quotes", 3, 42))
         self.assertEqual([row["id"] for row in db.milestone_projects(milestone["id"])],
                          [project["id"]])
+
+    def test_reimport_updates_task_details_without_resetting_status(self):
+        plan = {"projects": [{"name": "Website", "tasks": [{
+            "title": "Publish", "weight": 1, "due": "2026-08-01", "assignee": 10,
+        }]}]}
+        seed.apply_doc(seed.parse(json.dumps(plan), "plan.json"), G, 1)
+        project = db.get_project(G, "Website")
+        task = db.list_tasks(project["id"])[0]
+        db.set_task_status(task["id"], "doing")
+
+        plan["projects"][0]["tasks"][0].update(weight=4, due="2026-08-15", assignee=20)
+        seed.apply_doc(seed.parse(json.dumps(plan), "plan.json"), G, 1)
+
+        task = db.list_tasks(project["id"])[0]
+        self.assertEqual((task["weight"], task["due_date"], task["assignee_id"], task["status"]),
+                         (4, "2026-08-15", 20, "doing"))
+
+
+class TestConfiguredPermissions(Base):
+    def test_configured_gate_denies_any_command_name(self):
+        db.set_cmd_perm(G, "tree_requires", 777)
+        sent = []
+
+        class Response:
+            def is_done(self):
+                return False
+
+            async def send_message(self, message, **kwargs):
+                sent.append((message, kwargs))
+
+        interaction = SimpleNamespace(
+            command=SimpleNamespace(qualified_name="tree requires"),
+            guild_id=G,
+            user=SimpleNamespace(roles=[], guild_permissions=SimpleNamespace(manage_guild=False)),
+            response=Response(),
+        )
+        self.assertFalse(asyncio.run(tracker_bot.configured_command_permission(interaction)))
+        self.assertIn("tree requires", sent[0][0])
+        self.assertTrue(sent[0][1]["ephemeral"])
 
 
 class TestRendering(Base):

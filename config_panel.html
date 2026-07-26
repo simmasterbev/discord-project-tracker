@@ -33,7 +33,7 @@
   input[type=text],input[type=number],select{
     width:100%;background:#101216;border:1px solid var(--line);border-radius:5px;
     color:var(--ink);padding:8px 10px;font:inherit;font-size:14px}
-  input:focus,select:focus{outline:2px solid var(--accent);outline-offset:1px;border-color:transparent}
+  a:focus-visible,button:focus-visible,input:focus,select:focus{outline:2px solid var(--accent);outline-offset:1px;border-color:transparent}
   button{font:inherit;cursor:pointer;border-radius:5px;border:1px solid var(--line);
          background:var(--raised);color:var(--ink);padding:8px 13px;font-size:14px}
   button:hover{border-color:var(--accent);background:#1d2127}
@@ -140,11 +140,11 @@
 <div class="bar">
   <button class="primary" onclick="download()">Download config.json</button>
   <button onclick="copyJson()">Copy</button>
-  <span class="warn" id="status"></span>
+  <span class="warn" id="status" role="status" aria-live="polite"></span>
 </div>
 
 <script>
-const COMMANDS_FALLBACK = ["config_export", "config_import", "config_layout", "config_level", "config_permission", "config_permissions", "config_signoff", "config_tag-add", "config_tag-remove", "config_tags", "config_universal-role", "config_unlevel", "digest_set", "help", "leaderboard", "levels", "me", "next", "project_archive", "project_delete", "project_list", "project_log", "project_new", "project_unarchive", "project_view", "start", "task_add", "task_assign", "task_delete", "task_done", "task_list", "task_status", "tree_add", "tree_complete", "tree_confirm", "tree_drop", "tree_edit", "tree_exclude", "tree_history", "tree_import", "tree_include", "tree_link", "tree_list", "tree_new", "tree_note", "tree_remove", "tree_requires", "tree_show"];
+const COMMANDS_FALLBACK = ["config_board", "config_export", "config_import", "config_layout", "config_level", "config_notifies", "config_notify", "config_permission", "config_permissions", "config_signoff", "config_tag-add", "config_tag-remove", "config_tags", "config_universal-role", "config_unlevel", "config_unnotify", "digest_set", "help", "leaderboard", "levels", "me", "next", "project_archive", "project_delete", "project_list", "project_log", "project_new", "project_unarchive", "project_view", "start", "task_add", "task_assign", "task_delete", "task_done", "task_list", "task_status", "test_cleanup", "test_config", "test_moderation", "test_panel", "test_plan", "test_smoke", "test_suite", "test_super", "tree_add", "tree_complete", "tree_confirm", "tree_drop", "tree_edit", "tree_exclude", "tree_export", "tree_history", "tree_import", "tree_include", "tree_link", "tree_list", "tree_new", "tree_note", "tree_remove", "tree_requires", "tree_show"];
 let commands = COMMANDS_FALLBACK.slice();  // replaced by an export if loaded
 const KINDS = ["grp","region","team"];
 const KIND_LABEL = {grp:"Group",region:"Region",team:"Team"};
@@ -177,20 +177,20 @@ function render(){
   document.getElementById("added-roles").innerHTML =
     Object.entries(addedRoles).map(([id,name])=>
       `<span class="chip">${esc(name)} <span style="color:var(--muted)">· ${id}</span>`
-      + `<button onclick="removeRole('${id}')">✕</button></span>`
+      + `<button aria-label="Remove ${esc(name)}" onclick="removeRole('${id}')">✕</button></span>`
     ).join("") || `<span class="hint">No roles added by hand.</span>`;
 
   // permissions
   document.getElementById("perms").innerHTML = state.permissions.map((p,i)=>`
     <div class="row r-perm">
       <div><label>Command</label>
-        <select onchange="state.permissions[${i}].command=this.value">
+        <select aria-label="Permission rule command" onchange="state.permissions[${i}].command=this.value">
           <option value="">— pick a command —</option>
           ${commands.map(c=>`<option value="${c}" ${c===p.command?"selected":""}>/${c.replace(/_/g," ")}</option>`).join("")}
         </select></div>
       <div><label>Role</label>
-        <select onchange="state.permissions[${i}].role=this.value">${roleOptions(p.role)}</select></div>
-      <button class="ghost rmv" onclick="state.permissions.splice(${i},1);render()">Remove</button>
+        <select aria-label="Permission rule role" onchange="state.permissions[${i}].role=this.value">${roleOptions(p.role)}</select></div>
+      <button class="ghost rmv" aria-label="Remove permission rule" onclick="state.permissions.splice(${i},1);render()">Remove</button>
     </div>`).join("") || `<p class="hint">No command is restricted.</p>`;
 
   // special roles
@@ -219,7 +219,7 @@ function render(){
       <div style="margin-bottom:10px">
         <label>${KIND_LABEL[k]}s</label>
         <div class="chips">${state.taxonomy[k].map((v,i)=>
-          `<span class="chip">${esc(v)}<button onclick="state.taxonomy['${k}'].splice(${i},1);render()">✕</button></span>`
+          `<span class="chip">${esc(v)}<button aria-label="Remove ${esc(v)}" onclick="state.taxonomy['${k}'].splice(${i},1);render()">✕</button></span>`
           ).join("") || `<span class="hint">none</span>`}</div>
       </div>`).join("")}`;
 
@@ -233,7 +233,7 @@ function render(){
         oninput="state.levels[${i}].name=this.value"></div>
       <div><label>Perk (descriptive)</label><input type="text" value="${esc(l.perk||"")}"
         oninput="state.levels[${i}].perk=this.value"></div>
-      <button class="ghost rmv" onclick="state.levels.splice(${i},1);render()">Remove</button>
+      <button class="ghost rmv" aria-label="Remove level ${esc(l.name)||i+1}" onclick="state.levels.splice(${i},1);render()">Remove</button>
     </div>`).join("") || `<p class="hint">No levels.</p>`;
 }
 

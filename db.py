@@ -250,13 +250,16 @@ def _migrate(c: sqlite3.Connection) -> list[str]:
 
 def connect(path: Path | str = DB_PATH) -> sqlite3.Connection:
     global _conn
-    _conn = sqlite3.connect(path, check_same_thread=False)
-    _conn.row_factory = sqlite3.Row
-    _conn.executescript(SCHEMA)
-    _conn.commit()
-    for change in _migrate(_conn):
-        print(f"[db] migrated: added {change}")
-    return _conn
+    with _lock:
+        if _conn is not None:
+            _conn.close()
+        _conn = sqlite3.connect(path, check_same_thread=False)
+        _conn.row_factory = sqlite3.Row
+        _conn.executescript(SCHEMA)
+        _conn.commit()
+        for change in _migrate(_conn):
+            print(f"[db] migrated: added {change}")
+        return _conn
 
 
 def conn() -> sqlite3.Connection:
@@ -403,6 +406,15 @@ def set_task_status(task_id: int, status: str) -> None:
 
 def assign_task(task_id: int, assignee_id: Optional[int]) -> None:
     _exec("UPDATE tasks SET assignee_id = ? WHERE id = ?", (assignee_id, task_id))
+
+
+def update_task_details(task_id: int, assignee_id: Optional[int], due_date: Optional[str],
+                        weight: int) -> None:
+    """Update imported planning details without changing a task's live status."""
+    _exec(
+        "UPDATE tasks SET assignee_id = ?, due_date = ?, weight = ? WHERE id = ?",
+        (assignee_id, due_date, weight, task_id),
+    )
 
 
 def delete_task(task_id: int) -> None:
@@ -581,6 +593,17 @@ def milestone_projects(milestone_id: int) -> list[sqlite3.Row]:
     )
 
 
+def private_project_ids(guild_id: int) -> set[int]:
+    """Projects linked to private milestones must not appear on the public site."""
+    rows = _q(
+        "SELECT DISTINCT mp.project_id FROM milestone_projects mp "
+        "JOIN milestones m ON m.id = mp.milestone_id "
+        "WHERE m.guild_id = ? AND m.private = 1",
+        (guild_id,),
+    )
+    return {row["project_id"] for row in rows}
+
+
 def milestone_progress(milestone_id: int) -> dict[str, Any]:
     """Weighted completion across every project linked to this milestone."""
     row = _q(
@@ -739,30 +762,51 @@ def settle_milestone(guild_id: int, milestone_id: int, xp: int) -> dict[int, int
     A milestone with no tasks has no contributors to split across, so the credit
     goes to whoever signed it off.
     """
-    m = _q("SELECT * FROM milestones WHERE id = ?", (milestone_id,))[0]
-    if m["settled"]:
-        return {}
+    with _lock:
+        c = conn()
+        try:
+            c.execute("BEGIN IMMEDIATE")
+            m = c.execute(
+                "SELECT * FROM milestones WHERE id = ? AND guild_id = ?",
+                (milestone_id, guild_id),
+            ).fetchone()
+            if m is None or m["settled"]:
+                c.rollback()
+                return {}
 
-    # priority: names given at close > people who did tasks > whoever signed off
-    if m["credit_ids"]:
-        people = [int(x) for x in m["credit_ids"].split(",") if x.strip().isdigit()]
-    else:
-        people = contributors(milestone_id)
-    if not people and m["completed_by"]:
-        people = [m["completed_by"]]
+            # Priority: names given at close > people who did tasks > signer.
+            if m["credit_ids"]:
+                people = [int(x) for x in m["credit_ids"].split(",") if x.strip().isdigit()]
+            else:
+                rows = c.execute(
+                    "SELECT DISTINCT t.assignee_id AS uid FROM milestone_projects mp "
+                    "JOIN tasks t ON t.project_id = mp.project_id "
+                    "WHERE mp.milestone_id = ? AND t.status = 'done' "
+                    "AND t.assignee_id IS NOT NULL ORDER BY t.assignee_id",
+                    (milestone_id,),
+                ).fetchall()
+                people = [row["uid"] for row in rows]
+            if not people and m["completed_by"]:
+                people = [m["completed_by"]]
 
-    awards = even_split(xp, people)
-    for uid, amount in awards.items():
-        _exec(
-            "INSERT INTO credit (guild_id, user_id, milestone_id, xp, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (guild_id, uid, milestone_id, amount, now()),
-        )
-    _exec(
-        "UPDATE milestones SET settled = 1, completed_at = COALESCE(completed_at, ?) WHERE id = ?",
-        (now(), milestone_id),
-    )
-    return awards
+            awards = even_split(xp, people)
+            created_at = now()
+            for uid, amount in awards.items():
+                c.execute(
+                    "INSERT INTO credit (guild_id, user_id, milestone_id, xp, created_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (guild_id, uid, milestone_id, amount, created_at),
+                )
+            c.execute(
+                "UPDATE milestones SET settled = 1, completed_at = COALESCE(completed_at, ?) "
+                "WHERE id = ?",
+                (created_at, milestone_id),
+            )
+            c.commit()
+            return awards
+        except Exception:
+            c.rollback()
+            raise
 
 
 def complete_milestone(milestone_id: int, user_id: Optional[int] = None,

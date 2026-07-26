@@ -228,19 +228,23 @@ def apply_doc(doc: dict, guild_id: int, owner: int) -> list[str]:
     for spec in doc.get("projects", []):
         pid = upsert_project(guild_id, spec, owner)
         log.append(f"project  {spec['name']}")
+        existing_tasks = {task["title"]: task for task in db.list_tasks(pid)}
         for t in spec.get("tasks", []):
             if isinstance(t, str):
                 t = {"title": t}
-            existing = [r for r in db.list_tasks(pid) if r["title"] == t["title"]]
-            if existing:
-                continue
             try:
                 assignee = int(t["assignee"]) if t.get("assignee") else None
                 weight = max(1, min(20, int(t.get("weight", 1))))
             except (TypeError, ValueError):
                 assignee, weight = None, 1
-            db.add_task(pid, t["title"], assignee, t.get("due"), weight)
-            log.append(f"  task   {t['title']}")
+            due = t.get("due") or None
+            existing = existing_tasks.get(t["title"])
+            if existing:
+                db.update_task_details(existing["id"], assignee, due, weight)
+                log.append(f"  task   {t['title']} (updated)")
+            else:
+                db.add_task(pid, t["title"], assignee, due, weight)
+                log.append(f"  task   {t['title']}")
 
     for spec in doc.get("trees", []):
         tid = upsert_tree(guild_id, spec)

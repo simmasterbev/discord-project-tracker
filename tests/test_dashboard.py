@@ -42,6 +42,19 @@ class DashboardStateTest(unittest.TestCase):
         self.assertEqual([node["key"] for node in state["milestones"]], ["public"])
         self.assertEqual(state["trees"][0]["members"], ["public"])
 
+    def test_project_linked_to_private_work_is_not_public(self):
+        project_id = db.create_project(42, "Private project", "Do not publish", 1)
+        db.add_task(project_id, "Private task", assignee_id=123)
+        private_id = db.create_milestone(42, "private", "Private milestone", private=True)
+        db.link_project(private_id, project_id)
+
+        state = dashboard.public_state()
+
+        self.assertEqual(state["projects"], [])
+        self.assertEqual(state["tasks"], [])
+        self.assertNotIn("Private project", json.dumps(state))
+        self.assertNotIn("Private task", dashboard.task_report(state).decode())
+
     def test_reports_include_work_without_discord_user_ids(self):
         project_id = db.create_project(42, "Website", "Ship the dashboard", 1)
         db.add_task(project_id, "Publish it", assignee_id=987654321, due_date="2026-08-01", weight=2)

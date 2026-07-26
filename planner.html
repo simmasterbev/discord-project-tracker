@@ -100,7 +100,7 @@
   <div class="pane">
     <div class="field">
       <label for="treename">Tree name</label>
-      <input type="text" id="treename" value="Candidate forum" oninput="render()">
+      <input type="text" id="treename" placeholder="e.g. Candidate forum" oninput="renderBoard()">
     </div>
     <div class="field" style="background:var(--surface);border:1px solid var(--line);
          border-radius:9px;padding:12px 14px">
@@ -157,20 +157,15 @@
       <button onclick="copyPlan()">Copy instead</button>
       <p class="hint">Then run:<br>
         <code>/tree import</code> and attach the downloaded file.<br>
-        Plans with milestones only download as CSV. Add a project and it downloads as JSON.<br>
-        Re-running is safe — it updates rather than duplicating, so you can edit
-        the plan here and load it again.</p>
+        New milestone-only trees download as CSV. Adding a project, linking a project,
+        or extending an existing tree downloads JSON.<br>
+        Re-running adds or updates matching work; it never deletes live Discord work.</p>
     </div>
   </div>
 </div>
 
 <script>
-let nodes = [
-  {name:"Venue booked", desc:"Call three halls, compare quotes, sign, pay the deposit",
-   unlocks:"the date becomes announceable", req:[], xp:150, auto:true},
-  {name:"Panel confirmed", desc:"Four candidates agree in writing",
-   unlocks:"promotion can start", req:["Venue booked"], xp:250, auto:true}
-];
+let nodes = [];
 let projects = [];
 // Read-only reference data loaded from /tree export.
 let server = {trees: [], projects: []};
@@ -291,7 +286,11 @@ function removeNode(i){
 }
 // Text fields should not rebuild the editor: replacing its HTML drops focus and
 // puts the caret somewhere else. Only the preview needs a live refresh.
-function set(i,k,v){ nodes[i][k] = v; renderBoard(); }
+function set(i,k,v){
+  nodes[i][k] = v;
+  renderBoard();
+  if (k === "name") refreshChoiceChips();
+}
 function toggleTag(i,on){
   nodes[i].tagged = on;
   if (on){ nodes[i].grp ||= treeScope.grp; nodes[i].region ||= treeScope.region;
@@ -319,6 +318,7 @@ function setProject(i,key,value){
   projects[i][key] = value;
   if (key === "name" && old !== value)
     nodes.forEach(n => n.projects = (n.projects||[]).map(name => name === old ? value : name));
+  if (key === "name") refreshChoiceChips();
 }
 function addTask(i){ projects[i].tasks.push({title:"", weight:1, due:"", assignee:""}); render(); }
 function removeTask(i,j){ projects[i].tasks.splice(j,1); render(); }
@@ -327,6 +327,37 @@ function toggleProject(i,name){
   const links = nodes[i].projects ||= [], at = links.indexOf(name);
   at < 0 ? links.push(name) : links.splice(at,1);
   render();
+}
+
+function prerequisiteChips(i){
+  const n = nodes[i];
+  const local = nodes.filter((_,j)=>j!==i).map(o=>o.name).filter(Boolean).map(name =>
+    `<button type="button" class="chip" aria-pressed="${n.req.includes(name)}"
+       onclick="toggleReq(${i},'${esc(name).replace(/'/g,"\\'")}')">${esc(name)}</button>`).join("");
+  const remote = existingMilestones().map(m =>
+    `<button type="button" class="chip" style="opacity:.75;border-style:dashed"
+       aria-pressed="${n.req.includes(m.name)}" title="Already on the server"
+       onclick="toggleReq(${i},'${esc(m.name).replace(/'/g,"\\'")}')">${esc(m.name)} ·srv</button>`).join("");
+  return local + remote || `<span class="empty">Add another milestone first</span>`;
+}
+
+function projectChips(i){
+  const n = nodes[i], local = projects.filter(p=>p.name.trim());
+  const remote = server.projects.filter(p => p.name && !local.some(existing => existing.name === p.name));
+  const all = local.concat(remote);
+  return all.length ? all.map(p => `<button type="button" class="chip"
+       ${remote.includes(p)?'style="opacity:.75;border-style:dashed"':''}
+       aria-pressed="${(n.projects||[]).includes(p.name)}"
+       title="${remote.includes(p)?'Already on the server':''}"
+       onclick="toggleProject(${i},'${esc(p.name).replace(/'/g,"\\'")}')">${esc(p.name)}${remote.includes(p)?" ·srv":""}</button>`).join("")
+    : `<span class="empty">Add a project below first</span>`;
+}
+
+function refreshChoiceChips(){
+  document.querySelectorAll("[data-prereq-chips]").forEach(el =>
+    el.innerHTML = prerequisiteChips(Number(el.dataset.prereqChips)));
+  document.querySelectorAll("[data-project-chips]").forEach(el =>
+    el.innerHTML = projectChips(Number(el.dataset.projectChips)));
 }
 
 /* depth = longest path from a root, same rule the bot uses */
@@ -350,28 +381,8 @@ function tiers(){
 
 function render(){
   document.getElementById("editor").innerHTML = nodes.map((n,i)=>{
-    const others = nodes.filter((_,j)=>j!==i).map(o=>o.name).filter(Boolean);
-    const serverMilestones = existingMilestones();
-    const prereqChips = others.map(o=>`<button type="button" class="chip" aria-pressed="${n.req.includes(o)}"
-           onclick="toggleReq(${i},'${esc(o).replace(/'/g,"\\'")}')">${esc(o)}</button>`).join("");
-    const serverPrereqChips = serverMilestones.map(m=>`<button type="button" class="chip"
-           style="opacity:.75;border-style:dashed" aria-pressed="${n.req.includes(m.name)}"
-           title="Already on the server"
-           onclick="toggleReq(${i},'${esc(m.name).replace(/'/g,"\\'")}')">${esc(m.name)} ·srv</button>`).join("");
-    const chips = prereqChips + serverPrereqChips ||
-      `<span class="empty">Add another milestone first</span>`;
-    const localProjects = projects.filter(p=>p.name.trim());
-    const remoteProjects = server.projects.filter(p =>
-      p.name && !localProjects.some(local => local.name === p.name));
-    const allProjects = localProjects.concat(remoteProjects);
-    const projectChips = allProjects.length
-      ? allProjects.map(p=>`<button type="button" class="chip" ${remoteProjects.includes(p)?'style="opacity:.75;border-style:dashed"':''}
-           aria-pressed="${(n.projects||[]).includes(p.name)}"
-           title="${remoteProjects.includes(p)?'Already on the server':''}"
-           onclick="toggleProject(${i},'${esc(p.name).replace(/'/g,"\\'")}')">${esc(p.name)}${remoteProjects.includes(p)?" ·srv":""}</button>`).join("")
-      : `<span class="empty">Add a project below first</span>`;
     return `<div class="card">
-      <h3>Milestone ${i+1}<button class="ghost" onclick="removeNode(${i})">Remove</button></h3>
+      <h3>Milestone ${i+1}<button class="ghost" aria-label="Remove milestone ${i+1}" onclick="removeNode(${i})">Remove</button></h3>
       <div class="field"><label for="n${i}-name">Name</label>
         <input type="text" id="n${i}-name" value="${esc(n.name)}"
                placeholder="Venue booked" oninput="set(${i},'name',this.value)"></div>
@@ -381,7 +392,7 @@ function render(){
       <div class="field"><label for="n${i}-un">What does finishing it make possible?</label>
         <input type="text" id="n${i}-un" value="${esc(n.unlocks)}"
                placeholder="the date becomes announceable" oninput="set(${i},'unlocks',this.value)"></div>
-      <div class="field"><label>Must come after</label><div class="chips">${chips}</div></div>
+      <div class="field"><label>Must come after</label><div class="chips" data-prereq-chips="${i}">${prerequisiteChips(i)}</div></div>
       <div class="row2">
         <div class="field"><label for="n${i}-xp">XP</label>
           <input type="number" id="n${i}-xp" min="0" max="5000" value="${n.xp}"
@@ -402,7 +413,7 @@ function render(){
             <label for="n${i}-p" style="text-transform:none;letter-spacing:0;font-family:var(--sans);
                    font-size:13px;margin:0">🔒 Hide description</label></div></div>
       </div>
-      <div class="field"><label>Projects this milestone tracks</label><div class="chips">${projectChips}</div></div>
+      <div class="field"><label>Projects this milestone tracks</label><div class="chips" data-project-chips="${i}">${projectChips(i)}</div></div>
       <div class="field" style="margin-top:2px">
         <label style="display:flex;gap:6px;align-items:center;cursor:pointer">
           <input type="checkbox" ${n.tagged?"checked":""}
@@ -424,23 +435,23 @@ function render(){
 
   document.getElementById("project-editor").innerHTML = projects.map((p,i)=>{
     const tasks = p.tasks.map((task,j)=>`<div class="card" style="margin:8px 0 0;padding:11px">
-      <h3>Task ${j+1}<button class="ghost" onclick="removeTask(${i},${j})">Remove</button></h3>
+      <h3>Task ${j+1}<button class="ghost" aria-label="Remove task ${j+1}" onclick="removeTask(${i},${j})">Remove</button></h3>
       <div class="field"><label>What needs doing?</label>
-        <input type="text" value="${esc(task.title)}" placeholder="Get three quotes"
+        <input type="text" aria-label="Task ${j+1} title" value="${esc(task.title)}" placeholder="Get three quotes"
                oninput="setTask(${i},${j},'title',this.value)"></div>
       <div class="row3">
-        <div class="field"><label>Weight</label><input type="number" min="1" max="20" value="${task.weight||1}"
+        <div class="field"><label>Weight</label><input type="number" aria-label="Task ${j+1} weight" min="1" max="20" value="${task.weight||1}"
           oninput="setTask(${i},${j},'weight',this.value)"></div>
-        <div class="field"><label>Due date</label><input type="date" value="${esc(task.due)}"
+        <div class="field"><label>Due date</label><input type="date" aria-label="Task ${j+1} due date" value="${esc(task.due)}"
           oninput="setTask(${i},${j},'due',this.value)"></div>
-        <div class="field"><label>Assignee ID</label><input type="text" value="${esc(task.assignee)}" placeholder="optional"
+        <div class="field"><label>Assignee ID</label><input type="text" aria-label="Task ${j+1} assignee ID" value="${esc(task.assignee)}" placeholder="optional"
           oninput="setTask(${i},${j},'assignee',this.value)"></div>
       </div></div>`).join("") || `<p class="hint">No tasks yet.</p>`;
     return `<div class="card">
-      <h3>Project ${i+1}<button class="ghost" onclick="removeProject(${i})">Remove</button></h3>
-      <div class="field"><label>Project name</label><input type="text" id="p${i}-name" value="${esc(p.name)}"
+      <h3>Project ${i+1}<button class="ghost" aria-label="Remove project ${i+1}" onclick="removeProject(${i})">Remove</button></h3>
+      <div class="field"><label>Project name</label><input type="text" aria-label="Project ${i+1} name" id="p${i}-name" value="${esc(p.name)}"
         placeholder="Venue work" oninput="setProject(${i},'name',this.value)"></div>
-      <div class="field"><label>What is this project for?</label><textarea placeholder="Book and prepare the venue"
+      <div class="field"><label>What is this project for?</label><textarea aria-label="Project ${i+1} description" placeholder="Book and prepare the venue"
         oninput="setProject(${i},'desc',this.value)">${esc(p.desc)}</textarea></div>
       <div class="row3">
         <div class="field"><label>Group</label><select onchange="setProject(${i},'grp',this.value)">${taxOptions('grp',p.grp||'Universal')}</select></div>
@@ -535,7 +546,10 @@ function usesProjects(){
     nodes.some(n=>(n.projects||[]).length);
 }
 
+function hasMilestones(){ return nodes.some(n => n.name.trim()); }
+
 function download(){
+  if (!hasMilestones()){ alert("Add at least one milestone first."); return; }
   const name = (document.getElementById("treename").value.trim() || "tree")
                  .toLowerCase().replace(/[^a-z0-9]+/g,"-");
   const isJson = usesProjects();
@@ -548,6 +562,7 @@ function download(){
 }
 
 function copyPlan(){
+  if (!hasMilestones()){ alert("Add at least one milestone first."); return; }
   const data = usesProjects() ? JSON.stringify(jsonPlan(), null, 2) : csv();
   const extension = usesProjects() ? "json" : "csv";
   navigator.clipboard?.writeText(data).then(
