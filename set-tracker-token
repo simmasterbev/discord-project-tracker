@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-read -r -s -p "Discord bot token: " token
-printf '\n'
+if [[ "${1:-}" == "--stdin" ]]; then
+    token="$(cat)"
+else
+    read -r -s -p "Discord bot token: " token
+    printf '\n'
+fi
 test -n "$token"
 printf 'DISCORD_TOKEN=%s\nGUILD_ID=482335255202889740\n' "$token" > /etc/tracker-bot.env
 chmod 600 /etc/tracker-bot.env
