@@ -85,6 +85,12 @@ class DashboardStateTest(unittest.TestCase):
         self.assertTrue((dashboard.ROOT / "assets" / "prophet-bev-bubble-monkey-run.webp").is_file())
         self.assertTrue((dashboard.ROOT / "assets" / "prophet-bev-bubble-monkey-wave.webp").is_file())
 
+    def test_dashboard_includes_expandable_work_details(self):
+        self.assertIn('function showMilestone', dashboard.PAGE)
+        self.assertIn('function projectCard', dashboard.PAGE)
+        self.assertIn('function taskCard', dashboard.PAGE)
+        self.assertIn('tree-detail', dashboard.PAGE)
+
 
 if __name__ == "__main__":
     unittest.main()
