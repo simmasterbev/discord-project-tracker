@@ -251,7 +251,9 @@ def render_tree(
     own = [n for n in nodes if not n.get("external_from")]
     done = sum(1 for n in own if n["state"] == "complete")
     summary = f"{done}/{len(own)} milestones unlocked"
-    d.text((width - PAD - d.textlength(summary, font=F_SMALL), 35), summary,
+    # Keep the status line below the title. On narrow mobile-sized trees the
+    # right-aligned text otherwise overlaps long tree names.
+    d.text((width - PAD - d.textlength(summary, font=F_SMALL), 60), summary,
            font=F_SMALL, fill="#8fa1b8")
 
     def mid_y(k):

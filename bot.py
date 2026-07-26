@@ -1685,6 +1685,8 @@ async def test_smoke(interaction: discord.Interaction, visible: bool = True):
             )
 
         nodes = db.tree_view(guild_id, f"smoke-{suffix}")
+        for node in nodes:
+            node["people"] = await display_names(interaction.guild, node.get("people") or [])
         edges = db.tree_edges(guild_id, nodes)
         image = await asyncio.to_thread(
             tree_render.render_tree, nodes, edges, "Temporary Smoke Test", "lr"
@@ -1783,6 +1785,8 @@ async def test_suite(interaction: discord.Interaction, visual: bool = False):
         await show("✅ **Suite gate** reached 100%; **Suite unlock** is available; 100 XP awarded.")
 
         nodes = db.tree_view(guild_id, tree_key)
+        for node in nodes:
+            node["people"] = await display_names(interaction.guild, node.get("people") or [])
         edges = db.tree_edges(guild_id, nodes)
         left_to_right = await asyncio.to_thread(
             tree_render.render_tree, nodes, edges, "Temporary Suite Test", "lr"
@@ -1932,6 +1936,8 @@ async def test_plan(interaction: discord.Interaction, visual: bool = False):
         checks.append("project, task, and milestone link")
 
         nodes = db.tree_view(guild_id, tree_key)
+        for node in nodes:
+            node["people"] = await display_names(interaction.guild, node.get("people") or [])
         image = await asyncio.to_thread(tree_render.render_tree, nodes,
                                         db.tree_edges(guild_id, nodes), "Temporary Plan Test", "lr")
         if image.getbuffer().nbytes < 100:
