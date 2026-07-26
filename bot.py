@@ -514,6 +514,7 @@ class Tracker(commands.Bot):
         if not GUILD_ID and not self._command_cleanup_done:
             if len(self.guilds) == 1:
                 # A one-server test bot should not make us wait for global sync.
+                await self.http.bulk_upsert_global_commands(self.application_id, [])
                 guild = discord.Object(id=self.guilds[0].id)
                 self.tree.copy_global_to(guild=guild)
                 await self.tree.sync(guild=guild)
