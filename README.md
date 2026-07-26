@@ -92,6 +92,7 @@ about six. They're grouped by noun.
 | `/next [tree]` | What's ready to work on right now |
 | `/tree show [tree] [orientation]` | Draw the tree as an image |
 | `/tree confirm key [credit]` | Sign off a milestone, award its XP |
+| `/test smoke` | Run a temporary end-to-end check in the current channel |
 | `/me` | Your open tasks across every project (private) |
 | `/task done task_id` | Complete a task; the bar updates |
 
@@ -301,6 +302,10 @@ python discord_channel_smoke_test.py
 Enter the bot token and the channel ID. The script sends one labelled test
 message and edits it once. It does not create projects, tasks, trees, or
 database records.
+
+For a real in-server workflow check, run `/test smoke` as a server manager.
+It creates temporary project, task, tree, dependency, XP, and image-rendering
+data, reports each result in the channel, and removes the temporary data.
 
 ---
 

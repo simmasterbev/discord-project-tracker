@@ -15,6 +15,7 @@ import asyncio
 import logging
 import os
 import re
+import secrets
 import time
 from datetime import date, datetime, timedelta, timezone
 
@@ -433,6 +434,11 @@ config_group = app_commands.Group(
 )
 
 
+test_group = app_commands.Group(
+    name="test", description="Run live tracker checks", guild_only=True
+)
+
+
 @config_group.command(name="signoff", description="Which role may sign off milestones")
 @app_commands.describe(role="Leave blank to restrict sign-off to Manage Server only")
 @app_commands.default_permissions(manage_guild=True)
@@ -494,6 +500,7 @@ class Tracker(commands.Bot):
         self.tree.add_command(digest_group)
         self.tree.add_command(tree_group)
         self.tree.add_command(config_group)
+        self.tree.add_command(test_group)
         if GUILD_ID:                      # instant, scoped to one server
             guild = discord.Object(id=int(GUILD_ID))
             self.tree.copy_global_to(guild=guild)
@@ -1479,6 +1486,77 @@ async def tree_remove(interaction: discord.Interaction, key: str):
     await interaction.response.send_message(
         embed=wizard.danger_embed(f"Remove {m['name']}?", lines, note),
         view=wizard.DangerConfirm(interaction.user.id, do_remove, label="Remove"),
+    )
+
+
+@test_group.command(name="smoke", description="Run a temporary end-to-end tracker check")
+@app_commands.default_permissions(manage_guild=True)
+async def test_smoke(interaction: discord.Interaction):
+    """Exercise the core tracker flow without leaving test data behind."""
+    if not may_run(interaction, "test_smoke"):
+        await deny(interaction, "test_smoke")
+        return
+
+    await interaction.response.defer()
+    guild_id = interaction.guild_id
+    suffix = secrets.token_hex(3)
+    project_id = tree_id = gate_id = next_id = None
+    checks: list[str] = []
+    try:
+        project_id = db.create_project(guild_id, f"Smoke Test {suffix}", "temporary", interaction.user.id)
+        task_id = db.add_task(project_id, "Temporary test task", interaction.user.id)
+        tree_id = db.create_tree(guild_id, f"smoke-{suffix}", "Temporary Smoke Test")
+        gate_id = db.create_milestone(guild_id, f"smoke-gate-{suffix}", "Smoke gate", xp=100)
+        next_id = db.create_milestone(guild_id, f"smoke-next-{suffix}", "Smoke unlock")
+        db.add_to_tree(tree_id, gate_id)
+        db.add_to_tree(tree_id, next_id)
+        if not db.add_dep(next_id, gate_id):
+            raise AssertionError("dependency link was rejected")
+        db.link_project(gate_id, project_id)
+
+        if db.progress(project_id)["pct"] != 0:
+            raise AssertionError("new project did not start at 0%")
+        checks.append("project/task creation")
+        before = {n["key"]: n for n in db.tree_view(guild_id, f"smoke-{suffix}")}
+        if before[f"smoke-next-{suffix}"]["state"] != "locked":
+            raise AssertionError("dependency did not lock the next milestone")
+        checks.append("dependency locking")
+
+        db.set_task_status(task_id, "done")
+        after = {n["key"]: n for n in db.tree_view(guild_id, f"smoke-{suffix}")}
+        if after[f"smoke-gate-{suffix}"]["state"] != "complete":
+            raise AssertionError("completed task did not complete the milestone")
+        if after[f"smoke-next-{suffix}"]["state"] != "available":
+            raise AssertionError("completed milestone did not unlock the next one")
+        checks.append("progress and unlock")
+
+        awards = db.settle_milestone(guild_id, gate_id, 100)
+        if awards.get(interaction.user.id) != 100:
+            raise AssertionError("XP was not credited to the test user")
+        checks.append("XP credit")
+
+        nodes = db.tree_view(guild_id, f"smoke-{suffix}")
+        edges = db.tree_edges(guild_id, nodes)
+        image = await asyncio.to_thread(
+            tree_render.render_tree, nodes, edges, "Temporary Smoke Test", "lr"
+        )
+        if image.getbuffer().nbytes < 100:
+            raise AssertionError("tree image was empty")
+        checks.append("PNG rendering")
+    except Exception as error:
+        checks.append(f"FAILED: {error}")
+    finally:
+        if tree_id is not None:
+            db.delete_tree(tree_id)
+        for milestone_id in (next_id, gate_id):
+            if milestone_id is not None:
+                db.delete_milestone(milestone_id)
+        if project_id is not None:
+            db.delete_project(project_id)
+
+    result = "\n".join(f"✅ {check}" for check in checks)
+    await interaction.followup.send(
+        f"🧪 **Tracker smoke test**\n{result}\n\nTemporary test data was removed."
     )
 
 
