@@ -77,10 +77,10 @@ class DashboardStateTest(unittest.TestCase):
         self.assertTrue((dashboard.ROOT / "config_panel.html").is_file())
 
     def test_dashboard_includes_the_bev_idle_animation(self):
-        self.assertIn('/assets/prophet-bev-bubble-monkey-jump.webp', dashboard.PAGE)
+        self.assertIn('/assets/prophet-bev-bubble-monkey-run.webp', dashboard.PAGE)
         self.assertIn('/assets/prophet-bev-bubble-monkey-wave.webp', dashboard.PAGE)
         self.assertIn('.bev:hover .bev-wave', dashboard.PAGE)
-        self.assertTrue((dashboard.ROOT / "assets" / "prophet-bev-bubble-monkey-jump.webp").is_file())
+        self.assertTrue((dashboard.ROOT / "assets" / "prophet-bev-bubble-monkey-run.webp").is_file())
         self.assertTrue((dashboard.ROOT / "assets" / "prophet-bev-bubble-monkey-wave.webp").is_file())
 
 

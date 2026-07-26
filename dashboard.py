@@ -112,7 +112,7 @@ PAGE = r"""<!doctype html>
 </style>
 <style>
 .difficulty{margin:12px 0 10px}.difficulty .label{display:block;margin-bottom:4px;color:var(--gold)}.difficulty .bar{height:4px;background:#493a1d}.difficulty .bar i{background:var(--gold)!important}
-#overview{position:relative;padding-right:150px}.bev{position:absolute;right:10px;top:-12px;width:128px;height:139px;display:block;filter:drop-shadow(0 10px 14px #0008);outline-offset:5px}.bev img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;transition:opacity .12s ease}.bev-wave{opacity:0}.bev:hover .bev-jump,.bev:focus-visible .bev-jump{opacity:0}.bev:hover .bev-wave,.bev:focus-visible .bev-wave{opacity:1}@media(max-width:780px){#overview{padding-right:96px}.bev{width:86px;height:94px;right:0;top:0}}
+#overview{position:relative;padding-right:150px}.bev{position:absolute;right:10px;top:-12px;width:128px;height:139px;display:block;filter:drop-shadow(0 10px 14px #0008);outline-offset:5px}.bev img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;transition:opacity .12s ease}.bev-wave{opacity:0}.bev:hover .bev-run,.bev:focus-visible .bev-run{opacity:0}.bev:hover .bev-wave,.bev:focus-visible .bev-wave{opacity:1}@media(max-width:780px){#overview{padding-right:96px}.bev{width:86px;height:94px;right:0;top:0}}
 </style>
 <body><header class="top"><div class="mark"></div><div class="brand"><h1>Project Tracker</h1><p>Live progress from Discord</p></div><nav class="nav"><a href="#overview">Overview</a><a href="#tree-section">Tech tree</a><a href="#projects-section">Projects</a><a href="/tools/planner.html">Tree planner</a><a href="/tools/config_panel.html">Config panel</a><a href="#reports">Reports</a></nav></header><main>
 <section id="overview"><div class="eyebrow">Command center</div><div class="hero"><h2>Where the work is moving next.</h2><p class="sub">A read-only view of your Discord tracker: what is ready, what is blocked, and how each project moves the roadmap forward.</p></div><div id="stats" class="stats"></div></section>
@@ -135,7 +135,7 @@ fetch('/api/state',{cache:'no-store'}).then(r=>r.ok?r.json():Promise.reject()).t
 
 # Tree cards now include distinct difficulty and completion bars; leave enough vertical room per row.
 PAGE = PAGE.replace("max*205+60", "max*260+60").replace("row*205", "row*260")
-PAGE = PAGE.replace('<section id="overview">', '<section id="overview"><span class="bev" role="img" tabindex="0" aria-label="Animated Prophet Bev and his monkey companion"><img class="bev-jump" src="/assets/prophet-bev-bubble-monkey-jump.webp" alt=""><img class="bev-wave" src="/assets/prophet-bev-bubble-monkey-wave.webp" alt=""></span>')
+PAGE = PAGE.replace('<section id="overview">', '<section id="overview"><span class="bev" role="img" tabindex="0" aria-label="Animated Prophet Bev and his monkey companion"><img class="bev-run" src="/assets/prophet-bev-bubble-monkey-run.webp" alt=""><img class="bev-wave" src="/assets/prophet-bev-bubble-monkey-wave.webp" alt=""></span>')
 
 
 class Dashboard(BaseHTTPRequestHandler):
@@ -189,8 +189,8 @@ class Dashboard(BaseHTTPRequestHandler):
             self.send_bytes(200, "text/html", (ROOT / "planner.html").read_bytes())
         elif path == "/tools/config_panel.html":
             self.send_bytes(200, "text/html", (ROOT / "config_panel.html").read_bytes())
-        elif path == "/assets/prophet-bev-bubble-monkey-jump.webp":
-            self.send_bytes(200, "image/webp", (ROOT / "assets" / "prophet-bev-bubble-monkey-jump.webp").read_bytes())
+        elif path == "/assets/prophet-bev-bubble-monkey-run.webp":
+            self.send_bytes(200, "image/webp", (ROOT / "assets" / "prophet-bev-bubble-monkey-run.webp").read_bytes())
         elif path == "/assets/prophet-bev-bubble-monkey-wave.webp":
             self.send_bytes(200, "image/webp", (ROOT / "assets" / "prophet-bev-bubble-monkey-wave.webp").read_bytes())
         elif path in ("/", "/index.html"):
