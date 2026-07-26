@@ -1,0 +1,22 @@
+[Unit]
+Description=Discord project tracker bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=opc
+Group=opc
+WorkingDirectory=/opt/discord-project-tracker
+EnvironmentFile=/etc/tracker-bot.env
+ExecStart=/opt/discord-project-tracker/venv/bin/python /opt/discord-project-tracker/bot.py
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/discord-project-tracker
+
+[Install]
+WantedBy=multi-user.target

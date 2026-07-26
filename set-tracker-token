@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+read -r -s -p "Discord bot token: " token
+printf '\n'
+test -n "$token"
+printf 'DISCORD_TOKEN=%s\nGUILD_ID=482335255202889740\n' "$token" > /etc/tracker-bot.env
+chmod 600 /etc/tracker-bot.env
+systemctl enable --now tracker-bot
+systemctl --no-pager --full status tracker-bot
