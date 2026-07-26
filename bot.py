@@ -512,8 +512,16 @@ class Tracker(commands.Bot):
 
     async def on_ready(self):
         if not GUILD_ID and not self._command_cleanup_done:
-            for guild in self.guilds:
-                await self.http.bulk_upsert_guild_commands(self.application_id, guild.id, [])
+            if len(self.guilds) == 1:
+                # A one-server test bot should not make us wait for global sync.
+                guild = discord.Object(id=self.guilds[0].id)
+                self.tree.copy_global_to(guild=guild)
+                await self.tree.sync(guild=guild)
+            else:
+                for guild in self.guilds:
+                    await self.http.bulk_upsert_guild_commands(
+                        self.application_id, guild.id, []
+                    )
             self._command_cleanup_done = True
         print(f"Logged in as {self.user} · {len(self.guilds)} guild(s)")
 
