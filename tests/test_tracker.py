@@ -662,3 +662,36 @@ class TestConfigRoundTrip(Base):
         db.apply_config(G, doc, set())
         got = [(r["threshold"], r["name"]) for r in db.list_levels(G)]
         self.assertEqual(got, [(0, "Start"), (999, "End")])   # Legacy + defaults gone
+
+
+class TestModeratorTools(Base):
+    def test_notification_targets_inherit_from_tree_project_and_milestone(self):
+        milestone = self.milestone("gate")
+        project = db.create_project(G, "Work", "", 1)
+        db.link_project(milestone, project)
+        db.add_notify(G, "tree", self.tree, "role", 11)
+        db.add_notify(G, "project", project, "user", 22)
+        db.add_notify(G, "milestone", milestone, "user", 33)
+        self.assertEqual(db.effective_notify(G, milestone),
+                         {"role": [11], "user": [22, 33]})
+
+    def test_stuck_report_finds_old_idle_and_blocked_work(self):
+        idle = self.milestone("idle")
+        db._exec("UPDATE milestones SET created_at=datetime('now', '-10 days') WHERE id=?", (idle,))
+        project = db.create_project(G, "Blocked", "", 1)
+        db.add_task(project, "Waiting on permit", assignee_id=7)
+        db._exec("UPDATE tasks SET status='blocked' WHERE project_id=?", (project,))
+        report = db.stuck_report(G, stale_days=7)
+        self.assertEqual([item["name"] for item in report["idle"]], ["Idle"])
+        self.assertEqual([item["title"] for item in report["blocked"]], ["Waiting on permit"])
+
+    def test_board_settings_and_announce_flag_round_trip(self):
+        milestone = self.milestone("launch")
+        db.set_board(G, 555, 3, 14, "t")
+        db.set_announce_on_close(milestone, True)
+        self.assertEqual(db.all_board_guilds()[0]["board_channel"], 555)
+        self.assertIsNone(db.announce_fired(G))
+        db.complete_milestone(milestone, user_id=7)
+        self.assertIsNotNone(db.announce_fired(G))
+        db.mark_board_sent(G)
+        self.assertIsNone(db.announce_fired(G))

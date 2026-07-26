@@ -93,6 +93,7 @@ about six. They're grouped by noun.
 | `/config export` | Download server settings for the offline settings editor |
 | `/config import file` | Preview and apply an edited settings export |
 | `/tree import file` | Preview and apply a tree CSV from the offline planner |
+| `/stuck [days] [export]` | Manager-only report of idle, stalled, and blocked work |
 | `/next [tree]` | What's ready to work on right now |
 | `/tree show [tree] [orientation]` | Draw the tree as an image |
 | `/tree confirm key [credit]` | Sign off a milestone, award its XP |
@@ -101,6 +102,16 @@ about six. They're grouped by noun.
 | `/test config [visual]` | Test config export, preview, apply, edit, and restore |
 | `/me` | Your open tasks across every project (private) |
 | `/task done task_id` | Complete a task; the bar updates |
+
+### Moderator tools
+
+| Command | What it does |
+|---|---|
+| `/config board [channel] [tree] [weekday] [hour]` | Schedule a weekly tree image; omit the channel to turn it off |
+| `/config notify scope key role/person` | Ping selected people or roles when linked work unlocks |
+| `/config unnotify scope key role/person` | Remove a notification target |
+| `/config notifies key` | Show the effective notification list for a milestone |
+| `/stuck [days] [export]` | Show stale or blocked work; optionally download a CSV |
 
 ### Projects
 

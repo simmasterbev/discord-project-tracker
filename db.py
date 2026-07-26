@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
@@ -61,7 +61,13 @@ CREATE TABLE IF NOT EXISTS settings (
     digest_channel INTEGER,
     digest_weekday INTEGER NOT NULL DEFAULT 0,   -- 0 = Monday
     digest_hour    INTEGER NOT NULL DEFAULT 9,   -- UTC
-    last_digest    TEXT
+    last_digest    TEXT,
+
+    board_channel  INTEGER,                      -- scheduled tree-image post
+    board_weekday  INTEGER NOT NULL DEFAULT 0,
+    board_hour     INTEGER NOT NULL DEFAULT 9,
+    board_tree     TEXT,                          -- which tree, or all if null
+    last_board     TEXT
 );
 
 -- ---- tech tree --------------------------------------------------------
@@ -85,6 +91,8 @@ CREATE TABLE IF NOT EXISTS milestones (
     team         TEXT NOT NULL DEFAULT 'Universal',
     difficulty   REAL NOT NULL DEFAULT 1,        -- 1..10, half steps
     private      INTEGER NOT NULL DEFAULT 0,
+    created_at   TEXT,
+    announce_on_close INTEGER NOT NULL DEFAULT 0,
     UNIQUE (guild_id, key)
 );
 
@@ -98,6 +106,15 @@ CREATE TABLE IF NOT EXISTS milestone_projects (
     milestone_id INTEGER NOT NULL REFERENCES milestones(id) ON DELETE CASCADE,
     project_id   INTEGER NOT NULL REFERENCES projects(id)   ON DELETE CASCADE,
     PRIMARY KEY (milestone_id, project_id)
+);
+
+CREATE TABLE IF NOT EXISTS notify_targets (
+    guild_id    INTEGER NOT NULL,
+    scope       TEXT    NOT NULL,
+    scope_id    INTEGER NOT NULL,
+    target_kind TEXT    NOT NULL,
+    target_id   INTEGER NOT NULL,
+    PRIMARY KEY (guild_id, scope, scope_id, target_kind, target_id)
 );
 
 CREATE TABLE IF NOT EXISTS credit (
@@ -205,6 +222,13 @@ MIGRATIONS = [
     ("milestones", "team", "TEXT NOT NULL DEFAULT 'Universal'"),
     ("milestones", "difficulty", "REAL NOT NULL DEFAULT 1"),
     ("milestones", "private", "INTEGER NOT NULL DEFAULT 0"),
+    ("milestones", "created_at", "TEXT"),
+    ("milestones", "announce_on_close", "INTEGER NOT NULL DEFAULT 0"),
+    ("settings", "board_channel", "INTEGER"),
+    ("settings", "board_weekday", "INTEGER NOT NULL DEFAULT 0"),
+    ("settings", "board_hour", "INTEGER NOT NULL DEFAULT 9"),
+    ("settings", "board_tree", "TEXT"),
+    ("settings", "last_board", "TEXT"),
 ]
 
 # the three taxonomy dimensions share one shape
@@ -461,9 +485,9 @@ def all_digest_guilds() -> list[sqlite3.Row]:
 def create_milestone(guild_id: int, key: str, name: str, unlocks: str = "",
                      xp: int = 100, description: str = "", auto_close: bool = True) -> int:
     cur = _exec(
-        "INSERT INTO milestones (guild_id, key, name, description, unlocks, xp, auto_close) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (guild_id, key.lower(), name, description, unlocks, xp, int(auto_close)),
+        "INSERT INTO milestones (guild_id, key, name, description, unlocks, xp, auto_close, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (guild_id, key.lower(), name, description, unlocks, xp, int(auto_close), now()),
     )
     return cur.lastrowid
 
@@ -1522,3 +1546,150 @@ def apply_config(guild_id: int, doc: dict, valid_role_ids: set[int]) -> None:
                            lv.get("perk", ""))
         except (KeyError, ValueError, TypeError):
             continue
+
+
+# --------------------------------------------------------------------------
+# moderator reporting and notifications
+# --------------------------------------------------------------------------
+
+NOTIFY_SCOPES = ("project", "tree", "milestone")
+
+
+def milestone_assignees(milestone_id: int) -> list[int]:
+    rows = _q(
+        "SELECT DISTINCT t.assignee_id FROM milestone_projects mp "
+        "JOIN tasks t ON t.project_id = mp.project_id "
+        "WHERE mp.milestone_id = ? AND t.assignee_id IS NOT NULL",
+        (milestone_id,),
+    )
+    return [r["assignee_id"] for r in rows]
+
+
+def add_notify(guild_id: int, scope: str, scope_id: int, kind: str, target_id: int) -> None:
+    if scope not in NOTIFY_SCOPES or kind not in ("role", "user"):
+        raise ValueError("bad notify scope or kind")
+    _exec("INSERT OR IGNORE INTO notify_targets "
+          "(guild_id, scope, scope_id, target_kind, target_id) VALUES (?, ?, ?, ?, ?)",
+          (guild_id, scope, scope_id, kind, target_id))
+
+
+def remove_notify(guild_id: int, scope: str, scope_id: int, kind: str, target_id: int) -> None:
+    _exec("DELETE FROM notify_targets WHERE guild_id=? AND scope=? AND scope_id=? "
+          "AND target_kind=? AND target_id=?",
+          (guild_id, scope, scope_id, kind, target_id))
+
+
+def list_notify(guild_id: int, scope: str, scope_id: int) -> list[sqlite3.Row]:
+    return _q("SELECT target_kind, target_id FROM notify_targets "
+              "WHERE guild_id=? AND scope=? AND scope_id=?",
+              (guild_id, scope, scope_id))
+
+
+def effective_notify(guild_id: int, milestone_id: int) -> dict[str, list[int]]:
+    scope_ids = {"milestone": {milestone_id}, "tree": set(), "project": set()}
+    for r in _q("SELECT tree_id FROM tree_members WHERE milestone_id=?", (milestone_id,)):
+        scope_ids["tree"].add(r["tree_id"])
+    for r in _q("SELECT project_id FROM milestone_projects WHERE milestone_id=?", (milestone_id,)):
+        scope_ids["project"].add(r["project_id"])
+    for tid in scope_ids["tree"]:
+        row = _q("SELECT project_id FROM trees WHERE id=?", (tid,))
+        if row and row[0]["project_id"]:
+            scope_ids["project"].add(row[0]["project_id"])
+    targets = {"role": set(), "user": set()}
+    for scope, ids in scope_ids.items():
+        for sid in ids:
+            for target in list_notify(guild_id, scope, sid):
+                targets[target["target_kind"]].add(target["target_id"])
+    return {kind: sorted(ids) for kind, ids in targets.items()}
+
+
+def stuck_report(guild_id: int, stale_days: int = 7) -> dict:
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=stale_days)).isoformat()
+    idle, stalled = [], []
+    for milestone in tree_state(guild_id):
+        assignees = milestone_assignees(milestone["id"])
+        if milestone["state"] == "available" and milestone["pct"] == 0:
+            rows = _q("SELECT created_at FROM milestones WHERE id=?", (milestone["id"],))
+            created = rows[0]["created_at"] if rows else None
+            if created and created < cutoff:
+                idle.append({"name": milestone["name"], "key": milestone["key"],
+                             "assignees": assignees})
+        elif milestone["state"] == "active":
+            rows = _q("SELECT MAX(COALESCE(t.completed_at, t.created_at)) AS last "
+                      "FROM milestone_projects mp JOIN tasks t ON t.project_id = mp.project_id "
+                      "WHERE mp.milestone_id = ?", (milestone["id"],))
+            last = rows[0]["last"] if rows else None
+            if last and last < cutoff:
+                stalled.append({"name": milestone["name"], "key": milestone["key"],
+                                "pct": milestone["pct"], "last": last,
+                                "assignees": assignees})
+    blocked = _q("SELECT t.title, t.assignee_id, p.name AS project FROM tasks t "
+                 "JOIN projects p ON p.id=t.project_id WHERE p.guild_id=? "
+                 "AND t.status='blocked' AND p.status='active' ORDER BY p.name", (guild_id,))
+    return {"idle": idle, "stalled": stalled,
+            "blocked": [{"title": r["title"], "project": r["project"],
+                         "assignee": r["assignee_id"]} for r in blocked],
+            "stale_days": stale_days}
+
+
+def stuck_by_owner(report: dict) -> dict[int, dict]:
+    owners: dict[int, dict] = {}
+    def bucket(user_id: int):
+        return owners.setdefault(user_id or 0, {"idle": [], "stalled": [], "blocked": []})
+    for item in report["idle"]:
+        for user_id in item["assignees"] or [0]:
+            bucket(user_id)["idle"].append(item["name"])
+    for item in report["stalled"]:
+        for user_id in item["assignees"] or [0]:
+            bucket(user_id)["stalled"].append(item["name"])
+    for item in report["blocked"]:
+        bucket(item["assignee"])["blocked"].append(f"{item['title']} ({item['project']})")
+    return owners
+
+
+def set_board(guild_id: int, channel_id: int, weekday: int, hour: int,
+              tree: str | None) -> None:
+    get_settings(guild_id)
+    _exec("UPDATE settings SET board_channel=?, board_weekday=?, board_hour=?, board_tree=? "
+          "WHERE guild_id=?", (channel_id, weekday, hour, tree, guild_id))
+
+
+def clear_board(guild_id: int) -> None:
+    get_settings(guild_id)
+    _exec("UPDATE settings SET board_channel=NULL WHERE guild_id=?", (guild_id,))
+
+
+def mark_board_sent(guild_id: int) -> None:
+    _exec("UPDATE settings SET last_board=? WHERE guild_id=?", (now(), guild_id))
+
+
+def all_board_guilds() -> list[sqlite3.Row]:
+    return _q("SELECT * FROM settings WHERE board_channel IS NOT NULL")
+
+
+def closed_since(guild_id: int, since_iso: str | None) -> list[sqlite3.Row]:
+    if since_iso:
+        return _q("SELECT name, completed_at FROM milestones WHERE guild_id=? "
+                  "AND completed_at IS NOT NULL AND completed_at > ? ORDER BY completed_at",
+                  (guild_id, since_iso))
+    return _q("SELECT name, completed_at FROM milestones WHERE guild_id=? "
+              "AND completed_at IS NOT NULL ORDER BY completed_at", (guild_id,))
+
+
+def set_announce_on_close(milestone_id: int, on: bool) -> None:
+    _exec("UPDATE milestones SET announce_on_close=? WHERE id=?", (int(bool(on)), milestone_id))
+
+
+def announce_fired(guild_id: int) -> Optional[sqlite3.Row]:
+    rows = _q("SELECT * FROM settings WHERE guild_id=? AND board_channel IS NOT NULL", (guild_id,))
+    if not rows:
+        return None
+    board = rows[0]
+    if board["last_board"]:
+        hit = _q("SELECT 1 FROM milestones WHERE guild_id=? AND announce_on_close=1 "
+                 "AND completed_at IS NOT NULL AND completed_at > ? LIMIT 1",
+                 (guild_id, board["last_board"]))
+    else:
+        hit = _q("SELECT 1 FROM milestones WHERE guild_id=? AND announce_on_close=1 "
+                 "AND completed_at IS NOT NULL LIMIT 1", (guild_id,))
+    return board if hit else None

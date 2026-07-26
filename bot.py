@@ -489,6 +489,36 @@ async def digest_set(
     )
 
 
+@config_group.command(name="board", description="Post a tree image to a channel on a schedule")
+@app_commands.describe(channel="Where to post (leave blank to turn it off)",
+                       tree="Which tree, or all if blank",
+                       weekday="0 = Monday … 6 = Sunday", hour="Hour of day, UTC")
+@app_commands.default_permissions(manage_guild=True)
+async def config_board(interaction: discord.Interaction,
+                       channel: discord.TextChannel | None = None,
+                       tree: str | None = None,
+                       weekday: app_commands.Range[int, 0, 6] = 0,
+                       hour: app_commands.Range[int, 0, 23] = 9):
+    if not is_manager(interaction):
+        await interaction.response.send_message("This needs Manage Server permission.", ephemeral=True)
+        return
+    if channel is None:
+        await asyncio.to_thread(db.clear_board, interaction.guild_id)
+        await interaction.response.send_message("🗺️ Scheduled board post turned off.")
+        return
+    if tree and not await asyncio.to_thread(db.get_tree, interaction.guild_id, tree):
+        await interaction.response.send_message(
+            f"No tree `{tree}`. `/tree list` shows what exists.", ephemeral=True)
+        return
+    await asyncio.to_thread(db.set_board, interaction.guild_id, channel.id, weekday, hour, tree)
+    days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    scope = f"the **{tree}** tree" if tree else "the whole board"
+    await interaction.response.send_message(
+        f"🗺️ {scope.capitalize()} will post to {channel.mention} every "
+        f"{days[weekday]} at {hour:02d}:00 UTC."
+    )
+
+
 class Tracker(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=discord.Intents.default())
@@ -510,6 +540,7 @@ class Tracker(commands.Bot):
         else:                             # global: can take up to an hour to appear
             await self.tree.sync()
         self.digest_loop.start()
+        self.board_loop.start()
 
     async def on_ready(self):
         if not GUILD_ID and not self._command_cleanup_done:
@@ -548,6 +579,61 @@ class Tracker(commands.Bot):
     @digest_loop.before_loop
     async def before_digest(self):
         await self.wait_until_ready()
+
+    @tasks.loop(minutes=30)
+    async def board_loop(self):
+        now_utc = datetime.now(timezone.utc)
+        for settings in await asyncio.to_thread(db.all_board_guilds):
+            if (now_utc.weekday() != settings["board_weekday"]
+                    or now_utc.hour != settings["board_hour"]):
+                continue
+            if settings["last_board"]:
+                last = datetime.fromisoformat(settings["last_board"])
+                if (now_utc - last).total_seconds() < 60 * 60 * 20:
+                    continue
+            guild = self.get_guild(settings["guild_id"])
+            channel = self.get_channel(settings["board_channel"])
+            if guild is None or not isinstance(channel, discord.TextChannel):
+                continue
+            try:
+                posted = await self.post_board(guild, channel, settings["board_tree"], settings["last_board"])
+            except discord.HTTPException:
+                logging.exception("scheduled board post failed for guild %s", settings["guild_id"])
+                continue
+            if posted:
+                await asyncio.to_thread(db.mark_board_sent, settings["guild_id"])
+
+    @board_loop.before_loop
+    async def before_board(self):
+        await self.wait_until_ready()
+
+    async def post_board(self, guild: discord.Guild, channel: discord.TextChannel,
+                         tree_key: str | None, since: str | None) -> bool:
+        nodes = await asyncio.to_thread(db.tree_view, guild.id, tree_key)
+        if not nodes:
+            return False
+        for node in nodes:
+            node["people"] = await display_names(guild, node.get("people") or [])
+            if node["state"] == "complete" and node.get("completed_at"):
+                when = datetime.fromisoformat(node["completed_at"]).strftime("%d %b")
+                who = (await display_names(guild, [node["completed_by"]]))[0] \
+                    if node.get("completed_by") else "auto"
+                node["closed_label"] = f"closed by {who} · {when}"
+        tree = await asyncio.to_thread(db.get_tree, guild.id, tree_key) if tree_key else None
+        title = tree["name"] if tree else f"{guild.name} — everything"
+        edges = await asyncio.to_thread(db.tree_edges, guild.id, nodes)
+        mode = await asyncio.to_thread(db.get_layout, guild.id)
+        image = await asyncio.to_thread(tree_render.render_tree, nodes, edges, title, mode)
+        closed = await asyncio.to_thread(db.closed_since, guild.id, since)
+        if closed:
+            names = ", ".join(item["name"] for item in closed[-8:])
+            more = f" (+{len(closed) - 8} more)" if len(closed) > 8 else ""
+            summary = f"**Since last time:** {names}{more} completed."
+        else:
+            summary = "**Where things stand this week.**"
+        await channel.send(content=summary, file=discord.File(image, filename="board.png"),
+                           allowed_mentions=discord.AllowedMentions.none())
+        return True
 
     @staticmethod
     def build_digest(guild_id: int) -> discord.Embed | None:
@@ -697,8 +783,8 @@ def signoff_embed(m: dict) -> discord.Embed:
     return e
 
 
-def pending_unlocks(guild_id: int) -> list[discord.Embed]:
-    """Settle finished milestones, and flag ones waiting on a sign-off."""
+def pending_unlocks(guild_id: int) -> list[tuple[discord.Embed, dict[str, list[int]]]]:
+    """Settle finished milestones and return any people to notify."""
     state = db.tree_state(guild_id)
     by_key = {m["key"]: m for m in state}
     out = []
@@ -706,7 +792,7 @@ def pending_unlocks(guild_id: int) -> list[discord.Embed]:
         if m["state"] == "pending":
             if not db.pending_notified(m["id"]):
                 db.mark_pending_notified(m["id"], True)
-                out.append(signoff_embed(m))
+                out.append((signoff_embed(m), {"role": [], "user": []}))
             continue
         if m["state"] != "complete":
             # work reopened — let it announce again if it comes back
@@ -722,15 +808,41 @@ def pending_unlocks(guild_id: int) -> list[discord.Embed]:
             if m["key"] in n["prereqs"]
             and all(by_key[p]["state"] == "complete" for p in n["prereqs"])
         ]
-        out.append(unlock_embed(m, awards, newly))
-        out += [level_up_embed(u) for u in ups]     # after the unlock that caused it
+        targets = {"role": set(), "user": set()}
+        for node in newly:
+            targets["user"].update(db.milestone_assignees(node["id"]))
+            inherited = db.effective_notify(guild_id, node["id"])
+            targets["role"].update(inherited["role"])
+            targets["user"].update(inherited["user"])
+        ping = {kind: sorted(ids) for kind, ids in targets.items()}
+        out.append((unlock_embed(m, awards, newly), ping))
+        out += [(level_up_embed(up), {"role": [], "user": []}) for up in ups]
     return out
 
 
+def mention_line(targets: dict[str, list[int]]) -> str | None:
+    mentions = ([f"<@&{role_id}>" for role_id in targets["role"]]
+                + [f"<@{user_id}>" for user_id in targets["user"]])
+    if not mentions:
+        return None
+    shown = " ".join(mentions[:8])
+    return f"{shown} +{len(mentions) - 8} more" if len(mentions) > 8 else shown
+
+
 async def push_unlocks(interaction: discord.Interaction) -> None:
-    embeds = await asyncio.to_thread(pending_unlocks, interaction.guild_id)
-    for e in embeds:
-        await interaction.followup.send(embed=e)
+    updates = await asyncio.to_thread(pending_unlocks, interaction.guild_id)
+    for embed, targets in updates:
+        await interaction.followup.send(
+            content=mention_line(targets), embed=embed,
+            allowed_mentions=discord.AllowedMentions(roles=True, users=True, everyone=False),
+        )
+    board = await asyncio.to_thread(db.announce_fired, interaction.guild_id)
+    if board:
+        channel = interaction.client.get_channel(board["board_channel"])
+        if isinstance(channel, discord.TextChannel):
+            if await interaction.client.post_board(interaction.guild, channel,
+                                                   board["board_tree"], board["last_board"]):
+                await asyncio.to_thread(db.mark_board_sent, interaction.guild_id)
 
 
 # keyed per guild — the same person can hold different nicknames in different
@@ -1110,6 +1222,7 @@ async def tree_drop(interaction: discord.Interaction, tree: str):
     tree="Which tree to file it under",
     difficulty="1-10, half steps allowed (default 1)",
     private="Hide the description from anyone but assignees and permitted roles",
+    announce="Post the scheduled board immediately when this closes",
 )
 @app_commands.autocomplete(tree=tree_autocomplete)
 async def tree_add(
@@ -1124,6 +1237,7 @@ async def tree_add(
     auto_close: bool = True,
     difficulty: app_commands.Range[float, 1.0, 10.0] = 1.0,
     private: bool = False,
+    announce: bool = False,
 ):
     if not may_run(interaction, "tree_add"):
         await deny(interaction, "tree_add")
@@ -1138,6 +1252,8 @@ async def tree_add(
     team = t["team"] if t else "Universal"
     mid = db.create_milestone(interaction.guild_id, key, name, unlocks, xp, description,
                               auto_close, difficulty, private, grp, region, team)
+    if announce:
+        db.set_announce_on_close(mid, True)
     stubbed, looped = [], []
     for raw in filter(None, (r.strip() for r in requires.split(","))):
         rid, created = db.find_or_stub(interaction.guild_id, raw)
@@ -1184,6 +1300,7 @@ async def tree_add(
     group="Reassign the group",
     region="Reassign the region",
     team="Reassign the team",
+    announce="Post the scheduled board immediately when this closes",
 )
 async def tree_edit(
     interaction: discord.Interaction,
@@ -1198,13 +1315,14 @@ async def tree_edit(
     group: str | None = None,
     region: str | None = None,
     team: str | None = None,
+    announce: bool | None = None,
 ):
     m = db.get_milestone(interaction.guild_id, key)
     if not m:
         await interaction.response.send_message(f"No milestone `{key}`.", ephemeral=True)
         return
     nothing = all(v is None for v in (name, description, unlocks, xp, auto_close,
-                                      difficulty, private, group, region, team))
+                                      difficulty, private, group, region, team, announce))
     if nothing:
         gate = "closes itself at 100%" if m["auto_close"] else "waits for `/tree confirm`"
         await interaction.response.send_message(
@@ -1214,7 +1332,7 @@ async def tree_edit(
             f"is: {m['description'] or '*no description*'}\n"
             f"unlocks: {m['unlocks'] or '*no payoff written*'}\n"
             f"Pass any of name, description, unlocks, xp, auto_close, difficulty, "
-            f"private, group, region, team to change something.",
+                f"private, group, region, team, announce to change something.",
             ephemeral=True,
         )
         return
@@ -1232,6 +1350,8 @@ async def tree_edit(
         db.set_difficulty(m["id"], difficulty)
     if private is not None:
         db.set_private(m["id"], private)
+    if announce is not None:
+        db.set_announce_on_close(m["id"], announce)
     if any(v is not None for v in (group, region, team)):
         db.set_milestone_tags(m["id"], grp=group, region=region, team=team)
     if m["is_stub"] and (description or unlocks):
@@ -1823,6 +1943,58 @@ async def help_cmd(interaction: discord.Interaction):
     await interaction.response.send_message(embed=e, ephemeral=True)
 
 
+@bot.tree.command(name="stuck", description="What's idle, stalled, or blocked")
+@app_commands.guild_only()
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.describe(days="How many quiet days counts as stale (default 7)",
+                       export="Attach the full report as a CSV file")
+async def stuck(interaction: discord.Interaction,
+                days: app_commands.Range[int, 1, 90] = 7,
+                export: bool = False):
+    if not is_manager(interaction):
+        await interaction.response.send_message("This needs Manage Server permission.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    report = await asyncio.to_thread(db.stuck_report, interaction.guild_id, days)
+    total = len(report["idle"]) + len(report["stalled"]) + len(report["blocked"])
+    if not total:
+        await interaction.followup.send(f"Nothing is stale, idle, or blocked past {days} days. 🎉", ephemeral=True)
+        return
+    embed = discord.Embed(title="What's stuck", description=f"No movement in {days}+ days.",
+                          colour=discord.Color.orange())
+    for label, key, render in (
+        ("🟡 Idle — unlocked but not started", "idle",
+         lambda item: f"**{item['name']}**"),
+        ("🟠 Stalled — started, then quiet", "stalled",
+         lambda item: f"**{item['name']}** ({item['pct']}%)"),
+        ("🔴 Blocked tasks", "blocked",
+         lambda item: f"**{item['title']}** ({item['project']})"),
+    ):
+        items = report[key]
+        if items:
+            suffix = "" if len(items) <= 10 else f"\n+{len(items) - 10} more"
+            embed.add_field(name=f"{label} ({len(items)})",
+                            value="\n".join(render(item) for item in items[:10]) + suffix,
+                            inline=False)
+    file = None
+    if export:
+        import csv
+        import io
+        text = io.StringIO()
+        writer = csv.writer(text)
+        writer.writerow(["kind", "name", "detail", "assignee_id"])
+        for item in report["idle"]:
+            for user_id in item["assignees"] or [""]:
+                writer.writerow(["idle", item["name"], "unlocked, 0%", user_id])
+        for item in report["stalled"]:
+            for user_id in item["assignees"] or [""]:
+                writer.writerow(["stalled", item["name"], f"{item['pct']}%, last {item['last']}", user_id])
+        for item in report["blocked"]:
+            writer.writerow(["blocked", item["title"], item["project"], item["assignee"] or ""])
+        file = discord.File(io.BytesIO(text.getvalue().encode()), filename=f"stuck-{days}d.csv")
+    await interaction.followup.send(embed=embed, file=file, ephemeral=True)
+
+
 @bot.tree.command(name="next", description="What's closest to unlocking, and what's in the way")
 @app_commands.guild_only()
 @app_commands.describe(tree="Limit to one tree")
@@ -1948,6 +2120,103 @@ async def config_tags(interaction: discord.Interaction):
         vals = db.list_taxonomy(interaction.guild_id, kind)
         e.add_field(name=label.title() + "s", value=", ".join(vals), inline=False)
     await interaction.response.send_message(embed=e, ephemeral=True)
+
+
+_NOTIFY_SCOPE_CHOICES = [
+    app_commands.Choice(name="project", value="project"),
+    app_commands.Choice(name="tree", value="tree"),
+    app_commands.Choice(name="milestone", value="milestone"),
+]
+
+
+def resolve_notify_scope(guild_id: int, scope: str, key: str) -> int | None:
+    row = (db.get_project(guild_id, key) if scope == "project" else
+           db.get_tree(guild_id, key) if scope == "tree" else
+           db.get_milestone(guild_id, key))
+    return row["id"] if row else None
+
+
+@config_group.command(name="notify", description="Ping a role or person when something unlocks")
+@app_commands.choices(scope=_NOTIFY_SCOPE_CHOICES)
+@app_commands.describe(scope="Project, tree, or milestone", key="Its name or key",
+                       role="Role to ping (or use person)", person="Person to ping (or use role)")
+@app_commands.default_permissions(manage_guild=True)
+async def config_notify(interaction: discord.Interaction, scope: app_commands.Choice[str],
+                        key: str, role: discord.Role | None = None,
+                        person: discord.Member | None = None):
+    if not is_manager(interaction):
+        await interaction.response.send_message("This needs Manage Server permission.", ephemeral=True)
+        return
+    if not role and not person:
+        await interaction.response.send_message("Name a role or person to add.", ephemeral=True)
+        return
+    scope_id = await asyncio.to_thread(resolve_notify_scope, interaction.guild_id, scope.value, key)
+    if scope_id is None:
+        await interaction.response.send_message(f"No {scope.value} called `{key}`.", ephemeral=True)
+        return
+    added = []
+    if role:
+        await asyncio.to_thread(db.add_notify, interaction.guild_id, scope.value, scope_id, "role", role.id)
+        added.append(role.mention)
+    if person:
+        await asyncio.to_thread(db.add_notify, interaction.guild_id, scope.value, scope_id, "user", person.id)
+        added.append(person.mention)
+    await interaction.response.send_message(
+        f"🔔 {', '.join(added)} will be notified about **{key}** ({scope.value}).")
+
+
+@config_group.command(name="unnotify", description="Stop pinging a role or person")
+@app_commands.choices(scope=_NOTIFY_SCOPE_CHOICES)
+@app_commands.describe(scope="Project, tree, or milestone", key="Its name or key")
+@app_commands.default_permissions(manage_guild=True)
+async def config_unnotify(interaction: discord.Interaction, scope: app_commands.Choice[str],
+                          key: str, role: discord.Role | None = None,
+                          person: discord.Member | None = None):
+    if not is_manager(interaction):
+        await interaction.response.send_message("This needs Manage Server permission.", ephemeral=True)
+        return
+    if not role and not person:
+        await interaction.response.send_message("Name a role or person to remove.", ephemeral=True)
+        return
+    scope_id = await asyncio.to_thread(resolve_notify_scope, interaction.guild_id, scope.value, key)
+    if scope_id is None:
+        await interaction.response.send_message(f"No {scope.value} called `{key}`.", ephemeral=True)
+        return
+    removed = []
+    if role:
+        await asyncio.to_thread(db.remove_notify, interaction.guild_id, scope.value, scope_id, "role", role.id)
+        removed.append(role.mention)
+    if person:
+        await asyncio.to_thread(db.remove_notify, interaction.guild_id, scope.value, scope_id, "user", person.id)
+        removed.append(person.mention)
+    await interaction.response.send_message(f"🔕 Removed {', '.join(removed)} from **{key}**'s notify list.")
+
+
+@config_group.command(name="notifies", description="Show who gets pinged about a milestone")
+@app_commands.autocomplete(key=milestone_autocomplete)
+@app_commands.default_permissions(manage_guild=True)
+async def config_notifies(interaction: discord.Interaction, key: str):
+    if not is_manager(interaction):
+        await interaction.response.send_message("This needs Manage Server permission.", ephemeral=True)
+        return
+    milestone = await asyncio.to_thread(db.get_milestone, interaction.guild_id, key)
+    if not milestone:
+        await interaction.response.send_message(f"No milestone `{key}`.", ephemeral=True)
+        return
+    targets = await asyncio.to_thread(db.effective_notify, interaction.guild_id, milestone["id"])
+    assignees = await asyncio.to_thread(db.milestone_assignees, milestone["id"])
+    lines = []
+    if targets["role"]:
+        lines.append("Roles: " + ", ".join(f"<@&{role_id}>" for role_id in targets["role"]))
+    if targets["user"]:
+        lines.append("People: " + ", ".join(f"<@{user_id}>" for user_id in targets["user"]))
+    if assignees:
+        lines.append("Task assignees: " + ", ".join(f"<@{user_id}>" for user_id in assignees))
+    embed = discord.Embed(title=f"Who hears about {milestone['name']}",
+                          description="\n".join(lines) or "Nobody yet — add them with `/config notify`.",
+                          colour=discord.Color.blurple())
+    embed.set_footer(text="Project and tree notification lists are inherited.")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 @config_group.command(name="permission", description="Restrict a command to a role")
@@ -2354,6 +2623,29 @@ async def test_cleanup(interaction: discord.Interaction, visual: bool = False):
     await interaction.followup.send(
         "🧪 **Cleanup test**\n✅ Manager-only command uses a two-click confirmation.\n"
         + ("✅ A harmless visual preview was posted above." if visual else "Use `visual:True` for a preview."),
+        ephemeral=not visual,
+    )
+
+
+@test_group.command(name="moderation", description="Check the moderator reporting tools")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.describe(visual="Post a safe moderator-tools preview in this channel")
+async def test_moderation(interaction: discord.Interaction, visual: bool = False):
+    await interaction.response.defer(ephemeral=not visual)
+    commands = {command.name for command in config_group.commands}
+    expected = {"board", "notify", "unnotify", "notifies"}
+    if not expected <= commands or not bot.tree.get_command("stuck"):
+        await interaction.followup.send("❌ Moderator commands are incomplete.", ephemeral=True)
+        return
+    if visual:
+        embed = discord.Embed(title="Moderator tools preview", colour=discord.Color.orange())
+        embed.add_field(name="Scheduled board", value="`/config board` posts a tree image on a weekly schedule.", inline=False)
+        embed.add_field(name="Unlock notifications", value="`/config notify` assigns project, tree, or milestone alerts.", inline=False)
+        embed.add_field(name="Stuck-work report", value="`/stuck export:True` produces a manager-only CSV report.", inline=False)
+        await interaction.followup.send("🧪 **Moderator tools preview**", embed=embed)
+    await interaction.followup.send(
+        "🧪 **Moderator tools test**\n✅ scheduled board command\n✅ inherited unlock notifications\n✅ stuck-work report\n✅ announce-on-close setting\n"
+        + ("✅ A safe visual preview was posted above." if visual else "Use `visual:True` for a preview."),
         ephemeral=not visual,
     )
 
